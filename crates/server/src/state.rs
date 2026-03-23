@@ -1,0 +1,110 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
+
+#[derive(Debug, Clone)]
+pub struct Paths {
+    pub data_dir: PathBuf,
+    pub config_file: PathBuf,
+    pub state_file: PathBuf,
+    pub lock_file: PathBuf,
+    pub socket_file: PathBuf,
+    pub repos_dir: PathBuf,
+}
+
+impl Paths {
+    #[must_use]
+    pub fn new(config_dir: &Path, data_dir: &Path) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            config_file: config_dir.join("config.toml"),
+            state_file: data_dir.join("state.json"),
+            lock_file: data_dir.join("server.lock"),
+            socket_file: data_dir.join("server.sock"),
+            repos_dir: data_dir.join("repos"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotStatus {
+    Cloning,
+    Building,
+    Ready,
+    CheckedOut,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotState {
+    pub slot: u32,
+    pub status: SlotStatus,
+    pub last_refreshed: Option<DateTime<Utc>>,
+    pub checked_out_as: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectState {
+    pub slots: Vec<SlotState>,
+}
+
+impl ProjectState {
+    #[must_use]
+    pub fn next_slot_number(&self) -> u32 {
+        self.slots.iter().map(|s| s.slot).max().map_or(0, |n| n + 1)
+    }
+
+    #[must_use]
+    pub fn available_slots(&self) -> Vec<&SlotState> {
+        self.slots
+            .iter()
+            .filter(|s| s.status == SlotStatus::Ready)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn pool_slots(&self) -> Vec<&SlotState> {
+        self.slots
+            .iter()
+            .filter(|s| s.status != SlotStatus::CheckedOut)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerState {
+    pub projects: HashMap<String, ProjectState>,
+    pub last_updated: DateTime<Utc>,
+}
+
+impl Default for ServerState {
+    fn default() -> Self {
+        Self {
+            projects: HashMap::new(),
+            last_updated: Utc::now(),
+        }
+    }
+}
+
+pub fn load_state(path: &Path) -> Result<ServerState> {
+    if !path.exists() {
+        return Ok(ServerState::default());
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let state: ServerState = serde_json::from_str(&contents)?;
+    Ok(state)
+}
+
+pub fn save_state(path: &Path, state: &ServerState) -> Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+    let contents = serde_json::to_string_pretty(state)?;
+    std::fs::write(&tmp_path, contents)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
