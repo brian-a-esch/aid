@@ -46,6 +46,19 @@ aid cleanup
 aid purge
 ```
 
+### Issues
+- Rip out tokio, makes a lot of things harder to read and especially reason about
+- Need tests
+- refresh_slot git update command is not ideal
+- No submodule support
+- Need to have error model in place for when repo update or build fails. A
+  retry loop for poll makes sense. Build failing once seems like it should be
+  an error. Initial clone failing seems like a problem. Regardless, repos in an
+  error'ed state need to stop having work done, but count against our project
+  quota
+- Add handshake with protocol version & reject clients with wrong version
+- Add api typedefs, we're going to write client
+- Hot reload config
 
 ## Future Ideas
 
