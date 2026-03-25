@@ -26,7 +26,8 @@ pub struct Response {
 }
 
 impl Response {
-    fn success(data: serde_json::Value) -> Self {
+    #[must_use]
+    pub fn success(data: serde_json::Value) -> Self {
         Self {
             ok: true,
             data: Some(data),
@@ -34,7 +35,7 @@ impl Response {
         }
     }
 
-    fn error(msg: impl Into<String>) -> Self {
+    pub fn error(msg: impl Into<String>) -> Self {
         Self {
             ok: false,
             data: None,
