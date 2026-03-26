@@ -13,7 +13,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -21,7 +20,6 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
 
@@ -37,5 +35,4 @@ workspace = true
 agent = { path = "crates/agent" }
 server = { path = "crates/server" }
 anyhow.workspace = true
-tokio.workspace = true
-dirs.workspace = true
+

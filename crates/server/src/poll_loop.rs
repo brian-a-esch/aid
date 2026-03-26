@@ -528,7 +528,7 @@ impl<H: Handler> EventLoop<H> {
 
         self.clients.clear();
 
-        info!("shutdown complete");
+        info!("shutdown of event loop complete");
     }
 }
 

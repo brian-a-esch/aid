@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use tokio::process::Command;
 use tracing::{error, info};
 
 use crate::config::ProjectConfig;
@@ -17,7 +17,7 @@ pub fn slot_dir(repos_dir: &Path, project_name: &str, slot: u32) -> PathBuf {
     project_dir(repos_dir, project_name).join(format!("{slot:04}"))
 }
 
-pub async fn ensure_pool(
+pub fn ensure_pool(
     paths: &Paths,
     project: &ProjectConfig,
     pool_size: u32,
@@ -69,7 +69,7 @@ pub async fn ensure_pool(
         state::save_state(&paths.state_file, state)?;
 
         // Clone
-        if let Err(e) = clone_repo(project, &slot_path).await {
+        if let Err(e) = clone_repo(project, &slot_path) {
             error!(project = %project.name, slot = slot_num, "clone failed: {e}");
             let ps = state
                 .projects
@@ -90,7 +90,7 @@ pub async fn ensure_pool(
         state::save_state(&paths.state_file, state)?;
 
         // Build
-        match run_build(project, &slot_path).await {
+        match run_build(project, &slot_path) {
             Ok(()) => {
                 info!(project = %project.name, slot = slot_num, "build complete");
                 let ps = state
@@ -118,7 +118,7 @@ pub async fn ensure_pool(
     Ok(())
 }
 
-pub async fn refresh_slot(
+pub fn refresh_slot(
     repos_dir: &Path,
     project: &ProjectConfig,
     project_state: &mut ProjectState,
@@ -133,8 +133,7 @@ pub async fn refresh_slot(
     let output = Command::new("git")
         .args(["fetch", "origin"])
         .current_dir(&slot_path)
-        .output()
-        .await?;
+        .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -144,15 +143,14 @@ pub async fn refresh_slot(
     let output = Command::new("git")
         .args(["reset", "--hard", &format!("origin/{branch}")])
         .current_dir(&slot_path)
-        .output()
-        .await?;
+        .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(ServerError::Git(format!("git reset failed: {stderr}")));
     }
 
-    match run_build(project, &slot_path).await {
+    match run_build(project, &slot_path) {
         Ok(()) => {
             update_slot_status(project_state, slot_num, SlotStatus::Ready, None);
             if let Some(s) = project_state.slots.iter_mut().find(|s| s.slot == slot_num) {
@@ -173,7 +171,7 @@ pub async fn refresh_slot(
     Ok(())
 }
 
-async fn clone_repo(project: &ProjectConfig, dest: &Path) -> Result<()> {
+fn clone_repo(project: &ProjectConfig, dest: &Path) -> Result<()> {
     let mut args = vec!["clone"];
 
     let branch = project.effective_branch();
@@ -185,7 +183,7 @@ async fn clone_repo(project: &ProjectConfig, dest: &Path) -> Result<()> {
     let dest_str = dest.to_str().expect("non-utf8 path");
     args.push(dest_str);
 
-    let output = Command::new("git").args(&args).output().await?;
+    let output = Command::new("git").args(&args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -198,7 +196,7 @@ async fn clone_repo(project: &ProjectConfig, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn run_build(project: &ProjectConfig, dir: &Path) -> Result<()> {
+fn run_build(project: &ProjectConfig, dir: &Path) -> Result<()> {
     let Some(ref build_command) = project.build_command else {
         return Ok(());
     };
@@ -208,8 +206,7 @@ async fn run_build(project: &ProjectConfig, dir: &Path) -> Result<()> {
     let output = Command::new("sh")
         .args(["-c", build_command])
         .current_dir(dir)
-        .output()
-        .await?;
+        .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

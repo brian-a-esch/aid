@@ -47,7 +47,6 @@ aid purge
 ```
 
 ### Issues
-- Rip out tokio, makes a lot of things harder to read and especially reason about
 - Need tests
 - refresh_slot git update command is not ideal
 - No submodule support

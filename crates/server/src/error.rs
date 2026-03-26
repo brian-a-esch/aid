@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+// TODO at some point we should purge errors if we are not using all of them
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("config error: {0}")]
