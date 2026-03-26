@@ -46,6 +46,37 @@ aid cleanup
 aid purge
 ```
 
+### Configuration
+
+The config file lives at `~/.config/aid/config.toml`. Each `[[projects]]` entry
+describes a repository to clone, build, and keep fresh.
+
+```toml
+# Global configs (all optional)
+nslots = 2  # number of ready copies to keep per project
+refresh_interval_secs = 1800  # how often to pull & rebuild (default: 30 min)
+
+[[projects]]
+name = "myproject"
+repo_url = "https://github.com/org/myproject"
+branch = "main"  # optional, defaults to "main"
+nslots = 3  # optional per-project override
+has_submodules = false  # deafult
+
+# Each entry is split on whitespace into program + arguments and run directly
+# (no shell). Steps execute in order; the first failure aborts the build.
+build_command = [
+    "make build",
+    "make test",
+    "make clang-tidy",
+]
+
+[[projects]]
+name = "other-project"
+repo_url = "https://github.com/org/other"
+# No build_command means the clone is used as-is with no build step.
+```
+
 ### Issues
 - Need tests
 - refresh_slot git update command is not ideal

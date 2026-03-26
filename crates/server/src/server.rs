@@ -6,25 +6,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{self};
 use crate::error::{Result, ServerError};
+use crate::handler::AidHandler;
 use crate::poll_loop;
 use crate::state::{self, Paths};
-
-struct Tmp {}
-
-impl poll_loop::Handler for Tmp {
-    fn handle_message(&mut self, _msg: &[u8]) -> Vec<u8> {
-        info!("Got cliet msg");
-        vec![]
-    }
-
-    fn handle_child_exit(&mut self, _result: poll_loop::ChildExit) {
-        info!("Child has exited");
-    }
-
-    fn on_idle(&mut self) -> Option<std::process::Command> {
-        None
-    }
-}
 
 pub fn run(paths: &Paths, shutdown_fd: OwnedFd, sigchild_fd: OwnedFd) -> Result<()> {
     tracing_subscriber::fmt()
@@ -51,13 +35,18 @@ fn run_with_lockfile(paths: &Paths, shutdown_fd: OwnedFd, sigchild_fd: OwnedFd) 
     let config = config::load_config(&paths.config_file)?;
     info!("loaded {} project(s)", config.projects.len());
 
-    let mut _server_state = state::load_state(&paths.state_file)?;
+    let server_state = state::load_state(&paths.state_file)?;
     info!("loaded server state");
 
     let listener = UnixListener::bind(&paths.socket_file)?;
     info!("started listening on {}", paths.socket_file.display());
 
-    let mut event_loop = poll_loop::EventLoop::new(listener, shutdown_fd, sigchild_fd, Tmp {})?;
+    let mut event_loop = poll_loop::EventLoop::new(
+        listener,
+        shutdown_fd,
+        sigchild_fd,
+        AidHandler::new(config, server_state, paths),
+    )?;
     match event_loop.run() {
         Ok(()) => info!("aid server loop closed, exiting"),
         Err(e) => error!("aid server loop encountered error: {e}"),

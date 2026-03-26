@@ -41,7 +41,7 @@ pub fn ensure_pool(
         })
         .count();
     let needed = pool_size.saturating_sub(u32::try_from(available_count).unwrap_or(u32::MAX));
-    let start_slot = ps.next_slot_number();
+    let start_slot = ps.next_free_slot_number();
 
     for i in 0..needed {
         let slot_num = start_slot + i;
@@ -197,23 +197,31 @@ fn clone_repo(project: &ProjectConfig, dest: &Path) -> Result<()> {
 }
 
 fn run_build(project: &ProjectConfig, dir: &Path) -> Result<()> {
-    let Some(ref build_command) = project.build_command else {
+    let Some(ref steps) = project.build_command else {
         return Ok(());
     };
 
-    info!(project = %project.name, "running build: {build_command}");
+    for step in &steps.0 {
+        let mut tokens = step.split_ascii_whitespace();
+        let program = tokens.next().ok_or_else(|| {
+            ServerError::Build(format!("empty step in build_command for {}", project.name))
+        })?;
+        let args: Vec<&str> = tokens.collect();
 
-    let output = Command::new("sh")
-        .args(["-c", build_command])
-        .current_dir(dir)
-        .output()?;
+        info!(project = %project.name, "running build step: {step}");
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ServerError::Build(format!(
-            "build failed for {}: {stderr}",
-            project.name
-        )));
+        let output = Command::new(program)
+            .args(&args)
+            .current_dir(dir)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ServerError::Build(format!(
+                "build step `{step}` failed for {}: {stderr}",
+                project.name
+            )));
+        }
     }
 
     Ok(())

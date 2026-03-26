@@ -1,0 +1,17 @@
+nslots = 2
+refresh_interval_secs = 1800
+
+[[projects]]
+name = "myproject"
+repo_url = "https://github.com/org/myproject"
+branch = "main"
+nslots = 3
+build_command = [
+    "make build",
+    "make test",
+    "make clang-tidy",
+]
+
+[[projects]]
+name = "other-project"
+repo_url = "https://github.com/org/other"

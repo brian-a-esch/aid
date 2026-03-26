@@ -1,15 +1,27 @@
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ServerError};
 
-const DEFAULT_POOL_SIZE: u32 = 2;
+/// An ordered sequence of shell-style commands to execute during the build step.
+///
+/// Each entry is split on whitespace into program + arguments and executed directly
+/// (no shell involved). Steps are run in order; the first failure aborts the build.
+///
+/// # TOML example
+/// ```toml
+/// build_command = ["make build", "make test", "make clang-tidy"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Steps(pub Vec<String>);
+
+const DEFAULT_SLOT_SIZE: u32 = 2;
 const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 1800; // 30 minutes
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
-    pub pool_size: Option<u32>,
+    pub nslots: Option<u32>,
     pub refresh_interval_secs: Option<u64>,
     #[serde(default)]
     pub projects: Vec<ProjectConfig>,
@@ -19,9 +31,9 @@ pub struct Config {
 pub struct ProjectConfig {
     pub name: String,
     pub repo_url: String,
-    pub build_command: Option<String>,
+    pub build_command: Option<Steps>,
     pub branch: Option<String>,
-    pub pool_size: Option<u32>,
+    pub nslots: Option<u32>,
 }
 
 impl ProjectConfig {
@@ -33,11 +45,11 @@ impl ProjectConfig {
 
 impl Config {
     #[must_use]
-    pub fn effective_pool_size(&self, project: &ProjectConfig) -> u32 {
+    pub fn nslots(&self, project: &ProjectConfig) -> u32 {
         project
-            .pool_size
-            .or(self.pool_size)
-            .unwrap_or(DEFAULT_POOL_SIZE)
+            .nslots
+            .or(self.nslots)
+            .unwrap_or(DEFAULT_SLOT_SIZE)
     }
 
     #[must_use]

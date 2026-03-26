@@ -34,6 +34,7 @@ impl Paths {
 #[serde(rename_all = "snake_case")]
 pub enum SlotStatus {
     Cloning,
+    Pulling,
     Building,
     Ready,
     CheckedOut,
@@ -56,12 +57,13 @@ pub struct ProjectState {
 
 impl ProjectState {
     #[must_use]
-    pub fn next_slot_number(&self) -> u32 {
+    pub fn next_free_slot_number(&self) -> u32 {
         self.slots.iter().map(|s| s.slot).max().map_or(0, |n| n + 1)
     }
 
     #[must_use]
-    pub fn available_slots(&self) -> Vec<&SlotState> {
+    // TODO turn into iterable
+    pub fn ready_slots(&self) -> Vec<&SlotState> {
         self.slots
             .iter()
             .filter(|s| s.status == SlotStatus::Ready)
@@ -69,7 +71,8 @@ impl ProjectState {
     }
 
     #[must_use]
-    pub fn pool_slots(&self) -> Vec<&SlotState> {
+    // TODO turn into iterable
+    pub fn available_slots(&self) -> Vec<&SlotState> {
         self.slots
             .iter()
             .filter(|s| s.status != SlotStatus::CheckedOut)
