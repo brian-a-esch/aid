@@ -46,10 +46,7 @@ impl ProjectConfig {
 impl Config {
     #[must_use]
     pub fn nslots(&self, project: &ProjectConfig) -> u32 {
-        project
-            .nslots
-            .or(self.nslots)
-            .unwrap_or(DEFAULT_SLOT_SIZE)
+        project.nslots.or(self.nslots).unwrap_or(DEFAULT_SLOT_SIZE)
     }
 
     #[must_use]

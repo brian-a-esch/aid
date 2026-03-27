@@ -6,6 +6,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SlotId(pub u32);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ProjectId(pub usize);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct StepId(pub usize);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PendingAction {
+    Clone(ProjectId, SlotId),
+    CloneSubmodules(ProjectId, SlotId),
+    Update(ProjectId, SlotId),
+    UpdateSubmodules(ProjectId, SlotId),
+    Build(ProjectId, SlotId, StepId),
+}
+
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub data_dir: PathBuf,
@@ -34,6 +52,7 @@ impl Paths {
 #[serde(rename_all = "snake_case")]
 pub enum SlotStatus {
     Cloning,
+    Cloned,
     Pulling,
     Building,
     Ready,
@@ -84,6 +103,8 @@ impl ProjectState {
 pub struct ServerState {
     pub projects: HashMap<String, ProjectState>,
     pub last_updated: DateTime<Utc>,
+    #[serde(default)]
+    pub pending_action: Option<PendingAction>,
 }
 
 impl Default for ServerState {
@@ -91,6 +112,7 @@ impl Default for ServerState {
         Self {
             projects: HashMap::new(),
             last_updated: Utc::now(),
+            pending_action: None,
         }
     }
 }

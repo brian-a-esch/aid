@@ -1,32 +1,20 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tracing::info;
 
 use crate::config::Config;
+use crate::error::{Result, ServerError};
 use crate::poll_loop::{ChildExit, Handler};
-use crate::state::{Paths, ProjectState, ServerState, SlotState, SlotStatus};
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct SlotId(u32);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ProjectId(usize);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct StepId(usize);
-
-#[derive(Debug, PartialEq)]
-enum NextAction {
-    Clone(ProjectId, SlotId),
-    CloneSubmodules(ProjectId, SlotId),
-    Update(ProjectId, SlotId),
-    UpdateSubmodules(ProjectId, SlotId),
-    Build(ProjectId, SlotId, StepId),
-}
+use crate::state::{Paths, PendingAction, ProjectId, ServerState, SlotId, SlotState, SlotStatus};
 
 /// Inspect state and config and return the single most important action to take next.
-fn step(state: &mut ServerState, config: &Config) -> Option<NextAction> {
+fn step(state: &mut ServerState, config: &Config) -> Option<PendingAction> {
+    // Don't start a new action while one is already running.
+    if state.pending_action.is_some() {
+        return None;
+    }
+
     for (project_idx, project_config) in config.projects.iter().enumerate() {
         let project_id = ProjectId(project_idx);
         let nslots = config.nslots(project_config) as usize;
@@ -34,7 +22,7 @@ fn step(state: &mut ServerState, config: &Config) -> Option<NextAction> {
         let project_state = state
             .projects
             .entry(project_config.name.clone())
-            .or_insert_with(ProjectState::default);
+            .or_default();
 
         let pool_count = project_state.available_slots().len();
         if pool_count < nslots {
@@ -51,24 +39,96 @@ fn step(state: &mut ServerState, config: &Config) -> Option<NextAction> {
                 error_message: None,
             });
 
-            return Some(NextAction::Clone(project_id, slot_id));
+            let action = PendingAction::Clone(project_id, slot_id);
+            state.pending_action = Some(action.clone());
+            return Some(action);
         }
     }
 
     None
 }
 
+fn illegal_transition(status: &SlotStatus, action: &PendingAction) -> ServerError {
+    ServerError::Pool(format!(
+        "illegal transition: state={status:?}, action={action:?}"
+    ))
+}
+
+/// Apply the result of a completed child process to the state. Returns `Err` if the state is internally inconsistent
+fn complete(state: &mut ServerState, config: &Config, result: &ChildExit) -> Result<()> {
+    let action = state.pending_action.take().ok_or_else(|| {
+        ServerError::Pool("child exited but no pending action was recorded".into())
+    })?;
+
+    let (project_id, slot_id) = match action {
+        PendingAction::Clone(p, s)
+        | PendingAction::CloneSubmodules(p, s)
+        | PendingAction::Update(p, s)
+        | PendingAction::UpdateSubmodules(p, s)
+        | PendingAction::Build(p, s, _) => (p, s),
+    };
+
+    let project_config = config
+        .projects
+        .get(project_id.0)
+        .ok_or_else(|| ServerError::Pool(format!("no project at index {}", project_id.0)))?;
+
+    let project_state = state
+        .projects
+        .get_mut(&project_config.name)
+        .ok_or_else(|| {
+            ServerError::Pool(format!("no state for project '{}'", project_config.name))
+        })?;
+
+    let slot = project_state
+        .slots
+        .get_mut(slot_id.0 as usize)
+        .ok_or_else(|| {
+            ServerError::Pool(format!(
+                "no slot {} in project '{}'",
+                slot_id.0, project_config.name
+            ))
+        })?;
+
+    if result.success {
+        match (&slot.status, action) {
+            (SlotStatus::Cloning, PendingAction::Clone(_, _)) => {
+                slot.status = SlotStatus::Cloned;
+            }
+            (_, PendingAction::CloneSubmodules(_, _)) => {
+                todo!()
+            }
+            (_, PendingAction::Update(_, _)) => {
+                todo!()
+            }
+            (_, PendingAction::UpdateSubmodules(_, _)) => {
+                todo!()
+            }
+            (_, PendingAction::Build(_, _, _)) => {
+                todo!()
+            }
+            (status, other) => return Err(illegal_transition(status, &other)),
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        slot.status = SlotStatus::Error;
+        slot.error_message = Some(stderr.into_owned());
+    }
+
+    Ok(())
+}
+
 /// Build the destination path for a clone: `<repos_dir>/<project_name>/<slot_id>`.
-fn clone_dest(repos_dir: &PathBuf, project_name: &str, slot_id: SlotId) -> PathBuf {
+fn clone_dest(repos_dir: &Path, project_name: &str, slot_id: SlotId) -> PathBuf {
     repos_dir.join(project_name).join(slot_id.0.to_string())
 }
 
-/// Translate a `NextAction` into the `Command` that achieves it.
-fn to_command(config: &Config, repos_dir: &PathBuf, action: NextAction) -> Option<Command> {
+/// Translate a `PendingAction` into the `Command` that achieves it.
+fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Option<Command> {
     match action {
-        NextAction::Clone(project_id, slot_id) => {
+        PendingAction::Clone(project_id, slot_id) => {
             let project = config.projects.get(project_id.0)?;
-            let dest = clone_dest(repos_dir, &project.name, slot_id);
+            let dest = clone_dest(repos_dir, &project.name, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("clone")
@@ -77,21 +137,13 @@ fn to_command(config: &Config, repos_dir: &PathBuf, action: NextAction) -> Optio
                 .arg(&project.repo_url)
                 .arg(&dest);
 
-            info!(
-                "cloning '{}' (slot {}) -> {}",
-                project.name,
-                slot_id.0,
-                dest.display()
-            );
-
             Some(cmd)
         }
 
-        // Not yet implemented; fall through with None so the event loop stays idle.
-        NextAction::CloneSubmodules(_, _)
-        | NextAction::Update(_, _)
-        | NextAction::UpdateSubmodules(_, _)
-        | NextAction::Build(_, _, _) => None,
+        PendingAction::CloneSubmodules(_, _)
+        | PendingAction::Update(_, _)
+        | PendingAction::UpdateSubmodules(_, _)
+        | PendingAction::Build(_, _, _) => todo!(),
     }
 }
 
@@ -102,6 +154,7 @@ pub struct AidHandler<'a> {
 }
 
 impl<'a> AidHandler<'a> {
+    #[must_use]
     pub fn new(config: Config, state: ServerState, paths: &'a Paths) -> Self {
         Self {
             config,
@@ -111,7 +164,7 @@ impl<'a> AidHandler<'a> {
     }
 }
 
-impl<'a> Handler for AidHandler<'a> {
+impl Handler for AidHandler<'_> {
     fn handle_message(&mut self, msg: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(msg);
         info!("received client message: {}", text.trim());
@@ -119,17 +172,13 @@ impl<'a> Handler for AidHandler<'a> {
     }
 
     fn handle_child_exit(&mut self, result: ChildExit) {
-        if result.success {
-            info!("build step completed successfully");
-        } else {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            info!("build step failed: {stderr}");
-        }
+        complete(&mut self.state, &self.config, &result)
+            .expect("failed to apply completed action to state");
     }
 
     fn on_idle(&mut self) -> Option<Command> {
         let action = step(&mut self.state, &self.config)?;
-        to_command(&self.config, &self.paths.repos_dir, action)
+        to_command(&self.config, &self.paths.repos_dir, &action)
     }
 }
 
@@ -153,22 +202,40 @@ mod tests {
         let mut state = ServerState::default();
 
         let expected = [
-            NextAction::Clone(ProjectId(0), SlotId(0)), // myproject slot 0
-            NextAction::Clone(ProjectId(0), SlotId(1)), // myproject slot 1
-            NextAction::Clone(ProjectId(0), SlotId(2)), // myproject slot 2
-            NextAction::Clone(ProjectId(1), SlotId(0)), // other-project slot 0
-            NextAction::Clone(ProjectId(1), SlotId(1)), // other-project slot 1
+            PendingAction::Clone(ProjectId(0), SlotId(0)), // myproject slot 0
+            PendingAction::Clone(ProjectId(0), SlotId(1)), // myproject slot 1
+            PendingAction::Clone(ProjectId(0), SlotId(2)), // myproject slot 2
+            PendingAction::Clone(ProjectId(1), SlotId(0)), // other-project slot 0
+            PendingAction::Clone(ProjectId(1), SlotId(1)), // other-project slot 1
         ];
 
         for (step_num, want) in expected.into_iter().enumerate() {
             let action = step(&mut state, &config)
                 .unwrap_or_else(|| panic!("step {step_num}: expected action, got None"));
             assert_eq!(action, want, "step {step_num}");
+            // Simulate the child process completing successfully so the next
+            // step() call isn't blocked by a pending action.
+            complete(
+                &mut state,
+                &config,
+                &ChildExit {
+                    success: true,
+                    stdout: vec![],
+                    stderr: vec![],
+                },
+            )
+            .expect("complete should not fail in step sequence test");
         }
 
         assert!(
             step(&mut state, &config).is_none(),
             "all pools full: expected None"
         );
+
+        for p in state.projects.values() {
+            for s in p.slots.iter() {
+                assert_eq!(s.status, SlotStatus::Cloned);
+            }
+        }
     }
 }
