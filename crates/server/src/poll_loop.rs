@@ -4,6 +4,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Child, Stdio};
 
+use chrono::{DateTime, Utc};
 use tracing::{error, info, warn};
 
 static mut SIGNAL_WRITE_FD: RawFd = -1;
@@ -93,14 +94,14 @@ pub struct ChildExit {
 pub trait Handler {
     /// Called with a complete newline-delimited message from a client.
     /// Return the response bytes to send back (should include trailing newline).
-    fn handle_message(&mut self, msg: &[u8]) -> Vec<u8>;
+    fn handle_message(&mut self, now: DateTime<Utc>, msg: &[u8]) -> Vec<u8>;
 
     /// Called when a spawned child process exits.
-    fn handle_child_exit(&mut self, result: ChildExit);
+    fn handle_child_exit(&mut self, now: DateTime<Utc>, result: ChildExit);
 
     /// Called when no child is running. Return a command to spawn, or `None`
     /// if there is no work to do.
-    fn on_idle(&mut self) -> Option<std::process::Command>;
+    fn on_idle(&mut self, now: DateTime<Utc>) -> Option<std::process::Command>;
 }
 
 struct Client {
@@ -126,7 +127,7 @@ impl Client {
         self.write_buf.extend(data);
     }
 
-    fn process_client_lines<H: Handler>(&mut self, handler: &mut H) {
+    fn process_client_lines<H: Handler>(&mut self, now: DateTime<Utc>, handler: &mut H) {
         let lines = {
             let mut lines = Vec::new();
             loop {
@@ -139,7 +140,7 @@ impl Client {
         };
 
         for line in lines {
-            let response = handler.handle_message(&line);
+            let response = handler.handle_message(now, &line);
             self.enqueue_bytes(&response);
         }
     }
@@ -162,7 +163,11 @@ impl Client {
         Ok(())
     }
 
-    fn handle_client_readable<H: Handler>(&mut self, handler: &mut H) -> std::io::Result<()> {
+    fn handle_client_readable<H: Handler>(
+        &mut self,
+        now: DateTime<Utc>,
+        handler: &mut H,
+    ) -> std::io::Result<()> {
         // TODO cleanup
         let mut tmp_buf = [0u8; 4960];
         loop {
@@ -176,7 +181,7 @@ impl Client {
             }
         }
 
-        self.process_client_lines(handler);
+        self.process_client_lines(now, handler);
         Ok(())
     }
 }
@@ -292,13 +297,14 @@ impl<H: Handler> EventLoop<H> {
                 return Err(err);
             }
 
-            self.dispatch_poll_results();
+            let now = Utc::now();
+            self.dispatch_poll_results(now);
 
             // Ask the handler for work if idle
             if self.running_child.is_none()
-                && let Some(cmd) = self.handler.on_idle()
+                && let Some(cmd) = self.handler.on_idle(now)
             {
-                self.start_child(cmd);
+                self.start_child(now, cmd);
             }
         }
 
@@ -343,7 +349,7 @@ impl<H: Handler> EventLoop<H> {
 
     const POLL_TIMEOUT_MS: libc::c_int = 5000;
 
-    fn dispatch_poll_results(&mut self) {
+    fn dispatch_poll_results(&mut self, now: DateTime<Utc>) {
         let mut idx = 0;
         let mut child_done = false;
 
@@ -381,7 +387,10 @@ impl<H: Handler> EventLoop<H> {
             }
             if pfd.revents & libc::POLLIN != 0 {
                 let client = self.clients.get_mut(&pfd.fd).expect("client fd in map");
-                if client.handle_client_readable(&mut self.handler).is_err() {
+                if client
+                    .handle_client_readable(now, &mut self.handler)
+                    .is_err()
+                {
                     to_remove.push(pfd.fd);
                 }
             }
@@ -416,7 +425,7 @@ impl<H: Handler> EventLoop<H> {
                     &mut self.read_buf,
                 );
             }
-            self.try_reap_child(child_done);
+            self.try_reap_child(now, child_done);
         }
 
         // Accept new clients last so they don't interfere with pollfd indexing
@@ -462,7 +471,7 @@ impl<H: Handler> EventLoop<H> {
         }
     }
 
-    fn start_child(&mut self, mut cmd: std::process::Command) {
+    fn start_child(&mut self, now: DateTime<Utc>, mut cmd: std::process::Command) {
         match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(mut child) => {
                 let stdout: OwnedFd = child.stdout.take().expect("piped stdout").into();
@@ -481,16 +490,19 @@ impl<H: Handler> EventLoop<H> {
             }
             Err(e) => {
                 error!("failed to spawn child: {e}");
-                self.handler.handle_child_exit(ChildExit {
-                    success: false,
-                    stdout: Vec::new(),
-                    stderr: format!("spawn error: {e}").into_bytes(),
-                });
+                self.handler.handle_child_exit(
+                    now,
+                    ChildExit {
+                        success: false,
+                        stdout: Vec::new(),
+                        stderr: format!("spawn error: {e}").into_bytes(),
+                    },
+                );
             }
         }
     }
 
-    fn try_reap_child(&mut self, child_sig: bool) {
+    fn try_reap_child(&mut self, now: DateTime<Utc>, child_sig: bool) {
         let Some(ref mut rc) = self.running_child else {
             return;
         };
@@ -503,7 +515,7 @@ impl<H: Handler> EventLoop<H> {
                     stderr: std::mem::take(&mut rc.stderr_buf),
                 };
                 self.running_child = None;
-                self.handler.handle_child_exit(exit);
+                self.handler.handle_child_exit(now, exit);
             }
             Ok(None) => {
                 // still running
@@ -590,7 +602,7 @@ mod tests {
     }
 
     impl Handler for PingPong {
-        fn handle_message(&mut self, msg: &[u8]) -> Vec<u8> {
+        fn handle_message(&mut self, _now: DateTime<Utc>, msg: &[u8]) -> Vec<u8> {
             self.messages_received += 1;
             let text = String::from_utf8_lossy(msg);
             let trimmed = text.trim();
@@ -611,11 +623,11 @@ mod tests {
             }
         }
 
-        fn handle_child_exit(&mut self, _result: ChildExit) {
+        fn handle_child_exit(&mut self, _now: DateTime<Utc>, _result: ChildExit) {
             self.child_done = true;
         }
 
-        fn on_idle(&mut self) -> Option<std::process::Command> {
+        fn on_idle(&mut self, _now: DateTime<Utc>) -> Option<std::process::Command> {
             if self.spawn_child && !self.child_spawned {
                 self.child_spawned = true;
                 let mut cmd = std::process::Command::new("echo");

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chrono::{DateTime, Utc};
 use tracing::info;
 
 use crate::config::Config;
@@ -9,7 +10,7 @@ use crate::poll_loop::{ChildExit, Handler};
 use crate::state::{Paths, PendingAction, ProjectId, ServerState, Slot, SlotId, SlotStatus};
 
 /// Inspect state and config and return the single most important action to take next.
-fn step(state: &mut ServerState, config: &Config) -> Option<PendingAction> {
+fn step(_now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<PendingAction> {
     // Don't start a new action while one is already running.
     if state.pending_action.is_some() {
         return None;
@@ -65,7 +66,12 @@ fn illegal_transition(status: &SlotStatus, action: &PendingAction) -> ServerErro
 }
 
 /// Apply the result of a completed child process to the state. Returns `Err` if the state is internally inconsistent
-fn complete(state: &mut ServerState, config: &Config, result: &ChildExit) -> Result<()> {
+fn complete(
+    _now: DateTime<Utc>,
+    state: &mut ServerState,
+    config: &Config,
+    result: &ChildExit,
+) -> Result<()> {
     let action = state.pending_action.take().ok_or_else(|| {
         ServerError::Pool("child exited but no pending action was recorded".into())
     })?;
@@ -192,19 +198,19 @@ impl<'a> AidHandler<'a> {
 }
 
 impl Handler for AidHandler<'_> {
-    fn handle_message(&mut self, msg: &[u8]) -> Vec<u8> {
+    fn handle_message(&mut self, _now: DateTime<Utc>, msg: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(msg);
         info!("received client message: {}", text.trim());
         vec![]
     }
 
-    fn handle_child_exit(&mut self, result: ChildExit) {
-        complete(&mut self.state, &self.config, &result)
+    fn handle_child_exit(&mut self, now: DateTime<Utc>, result: ChildExit) {
+        complete(now, &mut self.state, &self.config, &result)
             .expect("failed to apply completed action to state");
     }
 
-    fn on_idle(&mut self) -> Option<Command> {
-        let action = step(&mut self.state, &self.config)?;
+    fn on_idle(&mut self, now: DateTime<Utc>) -> Option<Command> {
+        let action = step(now, &mut self.state, &self.config)?;
         Some(to_command(&self.config, &self.paths.repos_dir, &action))
     }
 }
@@ -223,8 +229,9 @@ mod tests {
         load_config(&path).expect("testdata/config.toml should parse cleanly")
     }
 
-    fn simulate_success(state: &mut ServerState, config: &Config) {
+    fn simulate_success(state: &mut ServerState, config: &Config, now: DateTime<Utc>) {
         complete(
+            now,
             state,
             config,
             &ChildExit {
@@ -240,6 +247,7 @@ mod tests {
     fn step_sequence_from_empty_state() {
         let config = load_test_config();
         let mut state = ServerState::default();
+        let now = Utc::now();
 
         let expected = [
             PendingAction::Clone(ProjectId(0), SlotId(0)),
@@ -253,14 +261,14 @@ mod tests {
         ];
 
         for (step_num, want) in expected.into_iter().enumerate() {
-            let action = step(&mut state, &config)
+            let action = step(now, &mut state, &config)
                 .unwrap_or_else(|| panic!("step {step_num}: expected action, got None"));
             assert_eq!(action, want, "step {step_num}");
-            simulate_success(&mut state, &config);
+            simulate_success(&mut state, &config, now);
         }
 
         assert!(
-            step(&mut state, &config).is_none(),
+            step(now, &mut state, &config).is_none(),
             "all pools full: expected None"
         );
 
