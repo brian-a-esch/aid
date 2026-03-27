@@ -6,7 +6,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::error::{Result, ServerError};
 use crate::poll_loop::{ChildExit, Handler};
-use crate::state::{Paths, PendingAction, ProjectId, ServerState, SlotId, SlotState, SlotStatus};
+use crate::state::{Paths, PendingAction, ProjectId, ServerState, Slot, SlotId, SlotStatus};
 
 /// Inspect state and config and return the single most important action to take next.
 fn step(state: &mut ServerState, config: &Config) -> Option<PendingAction> {
@@ -28,11 +28,10 @@ fn step(state: &mut ServerState, config: &Config) -> Option<PendingAction> {
         if pool_count < nslots {
             // Allocate the next slot number and immediately mark it as Cloning so
             // subsequent idle ticks don't schedule a duplicate.
-            let slot_number = project_state.next_free_slot_number();
-            let slot_id = SlotId(slot_number);
+            let slot_id = SlotId(project_state.next_free_slot_number());
 
-            project_state.slots.push(SlotState {
-                slot: slot_number,
+            project_state.slots.push(Slot {
+                id: slot_id,
                 status: SlotStatus::Cloning,
                 last_refreshed: None,
                 checked_out_as: None,
@@ -42,6 +41,17 @@ fn step(state: &mut ServerState, config: &Config) -> Option<PendingAction> {
             let action = PendingAction::Clone(project_id, slot_id);
             state.pending_action = Some(action.clone());
             return Some(action);
+        }
+
+        if project_config.has_submodules {
+            for slot in &mut project_state.slots {
+                if slot.status == SlotStatus::Cloned {
+                    slot.status = SlotStatus::CloningSubmodules;
+                    let action = PendingAction::CloneSubmodules(project_id, slot.id);
+                    state.pending_action = Some(action.clone());
+                    return Some(action);
+                }
+            }
         }
     }
 
@@ -95,8 +105,8 @@ fn complete(state: &mut ServerState, config: &Config, result: &ChildExit) -> Res
             (SlotStatus::Cloning, PendingAction::Clone(_, _)) => {
                 slot.status = SlotStatus::Cloned;
             }
-            (_, PendingAction::CloneSubmodules(_, _)) => {
-                todo!()
+            (SlotStatus::CloningSubmodules, PendingAction::CloneSubmodules(_, _)) => {
+                slot.status = SlotStatus::SubmodulesCloned;
             }
             (_, PendingAction::Update(_, _)) => {
                 todo!()
@@ -124,10 +134,13 @@ fn clone_dest(repos_dir: &Path, project_name: &str, slot_id: SlotId) -> PathBuf 
 }
 
 /// Translate a `PendingAction` into the `Command` that achieves it.
-fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Option<Command> {
+fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Command {
     match action {
         PendingAction::Clone(project_id, slot_id) => {
-            let project = config.projects.get(project_id.0)?;
+            let project = config
+                .projects
+                .get(project_id.0)
+                .expect("invalid project_id");
             let dest = clone_dest(repos_dir, &project.name, *slot_id);
 
             let mut cmd = Command::new("git");
@@ -137,11 +150,25 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Opti
                 .arg(&project.repo_url)
                 .arg(&dest);
 
-            Some(cmd)
+            cmd
         }
+        PendingAction::CloneSubmodules(project_id, slot_id) => {
+            let project = config
+                .projects
+                .get(project_id.0)
+                .expect("invalid project_id");
+            let dest = clone_dest(repos_dir, &project.name, *slot_id);
 
-        PendingAction::CloneSubmodules(_, _)
-        | PendingAction::Update(_, _)
+            let mut cmd = Command::new("git");
+            cmd.arg("submodule")
+                .arg("update")
+                .arg("--init")
+                .arg("--recursive")
+                .current_dir(&dest);
+
+            cmd
+        }
+        PendingAction::Update(_, _)
         | PendingAction::UpdateSubmodules(_, _)
         | PendingAction::Build(_, _, _) => todo!(),
     }
@@ -178,7 +205,7 @@ impl Handler for AidHandler<'_> {
 
     fn on_idle(&mut self) -> Option<Command> {
         let action = step(&mut self.state, &self.config)?;
-        to_command(&self.config, &self.paths.repos_dir, &action)
+        Some(to_command(&self.config, &self.paths.repos_dir, &action))
     }
 }
 
@@ -196,35 +223,40 @@ mod tests {
         load_config(&path).expect("testdata/config.toml should parse cleanly")
     }
 
+    fn simulate_success(state: &mut ServerState, config: &Config) {
+        complete(
+            state,
+            config,
+            &ChildExit {
+                success: true,
+                stdout: vec![],
+                stderr: vec![],
+            },
+        )
+        .expect("complete should not fail in step sequence test");
+    }
+
     #[test]
     fn step_sequence_from_empty_state() {
         let config = load_test_config();
         let mut state = ServerState::default();
 
         let expected = [
-            PendingAction::Clone(ProjectId(0), SlotId(0)), // myproject slot 0
-            PendingAction::Clone(ProjectId(0), SlotId(1)), // myproject slot 1
-            PendingAction::Clone(ProjectId(0), SlotId(2)), // myproject slot 2
-            PendingAction::Clone(ProjectId(1), SlotId(0)), // other-project slot 0
-            PendingAction::Clone(ProjectId(1), SlotId(1)), // other-project slot 1
+            PendingAction::Clone(ProjectId(0), SlotId(0)),
+            PendingAction::Clone(ProjectId(0), SlotId(1)),
+            PendingAction::Clone(ProjectId(0), SlotId(2)),
+            PendingAction::CloneSubmodules(ProjectId(0), SlotId(0)),
+            PendingAction::CloneSubmodules(ProjectId(0), SlotId(1)),
+            PendingAction::CloneSubmodules(ProjectId(0), SlotId(2)),
+            PendingAction::Clone(ProjectId(1), SlotId(0)),
+            PendingAction::Clone(ProjectId(1), SlotId(1)),
         ];
 
         for (step_num, want) in expected.into_iter().enumerate() {
             let action = step(&mut state, &config)
                 .unwrap_or_else(|| panic!("step {step_num}: expected action, got None"));
             assert_eq!(action, want, "step {step_num}");
-            // Simulate the child process completing successfully so the next
-            // step() call isn't blocked by a pending action.
-            complete(
-                &mut state,
-                &config,
-                &ChildExit {
-                    success: true,
-                    stdout: vec![],
-                    stderr: vec![],
-                },
-            )
-            .expect("complete should not fail in step sequence test");
+            simulate_success(&mut state, &config);
         }
 
         assert!(
@@ -232,9 +264,19 @@ mod tests {
             "all pools full: expected None"
         );
 
-        for p in state.projects.values() {
+        for (name, p) in &state.projects {
+            let project_config = config
+                .projects
+                .iter()
+                .find(|c| c.name == *name)
+                .expect("project in state should exist in config");
             for s in p.slots.iter() {
-                assert_eq!(s.status, SlotStatus::Cloned);
+                let expected = if project_config.has_submodules {
+                    SlotStatus::SubmodulesCloned
+                } else {
+                    SlotStatus::Cloned
+                };
+                assert_eq!(s.status, expected, "project '{name}' slot {:?}", s.id);
             }
         }
     }

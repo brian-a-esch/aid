@@ -6,6 +6,7 @@ name = "myproject"
 repo_url = "https://github.com/org/myproject"
 branch = "main"
 nslots = 3
+has_submodules = true
 build_command = [
     "make build",
     "make test",

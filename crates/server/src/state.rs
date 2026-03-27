@@ -53,6 +53,8 @@ impl Paths {
 pub enum SlotStatus {
     Cloning,
     Cloned,
+    CloningSubmodules,
+    SubmodulesCloned,
     Pulling,
     Building,
     Ready,
@@ -61,8 +63,8 @@ pub enum SlotStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlotState {
-    pub slot: u32,
+pub struct Slot {
+    pub id: SlotId,
     pub status: SlotStatus,
     pub last_refreshed: Option<DateTime<Utc>>,
     pub checked_out_as: Option<String>,
@@ -71,18 +73,18 @@ pub struct SlotState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectState {
-    pub slots: Vec<SlotState>,
+    pub slots: Vec<Slot>,
 }
 
 impl ProjectState {
     #[must_use]
     pub fn next_free_slot_number(&self) -> u32 {
-        self.slots.iter().map(|s| s.slot).max().map_or(0, |n| n + 1)
+        self.slots.iter().map(|s| s.id).max().map_or(0, |n| n.0 + 1)
     }
 
     #[must_use]
     // TODO turn into iterable
-    pub fn ready_slots(&self) -> Vec<&SlotState> {
+    pub fn ready_slots(&self) -> Vec<&Slot> {
         self.slots
             .iter()
             .filter(|s| s.status == SlotStatus::Ready)
@@ -91,7 +93,7 @@ impl ProjectState {
 
     #[must_use]
     // TODO turn into iterable
-    pub fn available_slots(&self) -> Vec<&SlotState> {
+    pub fn available_slots(&self) -> Vec<&Slot> {
         self.slots
             .iter()
             .filter(|s| s.status != SlotStatus::CheckedOut)

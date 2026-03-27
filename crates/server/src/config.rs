@@ -34,6 +34,8 @@ pub struct ProjectConfig {
     pub build_command: Option<Steps>,
     pub branch: Option<String>,
     pub nslots: Option<u32>,
+    #[serde(default)]
+    pub has_submodules: bool,
 }
 
 impl ProjectConfig {
