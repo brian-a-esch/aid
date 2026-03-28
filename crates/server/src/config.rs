@@ -2,7 +2,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, ServerError};
+use crate::{
+    error::{Result, ServerError},
+    state::ProjectId,
+};
 
 /// An ordered sequence of shell-style commands to execute during the build step.
 ///
@@ -29,7 +32,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectConfig {
-    pub name: String,
+    pub name: ProjectId,
     pub repo_url: String,
     pub build_command: Option<Steps>,
     pub branch: Option<String>,
@@ -78,13 +81,13 @@ pub fn load_config(path: &Path) -> Result<Config> {
 }
 
 fn validate_project(project: &ProjectConfig) -> Result<()> {
-    if project.name.is_empty() {
+    if project.name.0.is_empty() {
         return Err(ServerError::Config("project name is required".into()));
     }
     if project.repo_url.is_empty() {
         return Err(ServerError::Config(format!(
             "repo_url is required for project '{}'",
-            project.name
+            project.name.0
         )));
     }
     Ok(())

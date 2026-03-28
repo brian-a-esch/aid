@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,8 +10,8 @@ use crate::error::Result;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SlotId(pub u32);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ProjectId(pub usize);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct ProjectId(pub Rc<str>);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StepId(pub usize);
@@ -104,7 +105,7 @@ impl ProjectState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerState {
-    pub projects: HashMap<String, ProjectState>,
+    pub projects: HashMap<ProjectId, ProjectState>,
     pub last_updated: DateTime<Utc>,
     #[serde(default)]
     pub pending_action: Option<PendingAction>,

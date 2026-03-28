@@ -7,7 +7,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::error::{Result, ServerError};
 use crate::poll_loop::{ChildExit, Handler};
-use crate::state::{Paths, PendingAction, ProjectId, ServerState, Slot, SlotId, SlotStatus};
+use crate::state::{Paths, PendingAction, ServerState, Slot, SlotId, SlotStatus};
 
 /// Inspect state and config and return the single most important action to take next.
 fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<PendingAction> {
@@ -16,8 +16,7 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
         return None;
     }
 
-    for (project_idx, project_config) in config.projects.iter().enumerate() {
-        let project_id = ProjectId(project_idx);
+    for project_config in &config.projects {
         let nslots = config.nslots(project_config) as usize;
 
         let project_state = state
@@ -39,7 +38,7 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
                 error_message: None,
             });
 
-            let action = PendingAction::Clone(project_id, slot_id);
+            let action = PendingAction::Clone(project_config.name.clone(), slot_id);
             state.pending_action = Some(action.clone());
             return Some(action);
         }
@@ -48,7 +47,8 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
             for slot in &mut project_state.slots {
                 if slot.status == SlotStatus::Cloned {
                     slot.status = SlotStatus::CloningSubmodules;
-                    let action = PendingAction::CloneSubmodules(project_id, slot.id);
+                    let action =
+                        PendingAction::CloneSubmodules(project_config.name.clone(), slot.id);
                     state.pending_action = Some(action.clone());
                     return Some(action);
                 }
@@ -57,9 +57,7 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
     }
 
     // Update loop — only reached when all slots across all projects are fully cloned.
-    for (project_idx, project_config) in config.projects.iter().enumerate() {
-        let project_id = ProjectId(project_idx);
-
+    for project_config in &config.projects {
         let project_state = state
             .projects
             .entry(project_config.name.clone())
@@ -78,7 +76,7 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
 
             if eligible && is_stale {
                 slot.status = SlotStatus::Updating;
-                let action = PendingAction::Update(project_id, slot.id);
+                let action = PendingAction::Update(project_config.name.clone(), slot.id);
                 state.pending_action = Some(action.clone());
                 return Some(action);
             }
@@ -86,7 +84,7 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
 
         for slot in &mut project_state.slots {
             if slot.status == SlotStatus::UpdatingSubmodules {
-                let action = PendingAction::UpdateSubmodules(project_id, slot.id);
+                let action = PendingAction::UpdateSubmodules(project_config.name.clone(), slot.id);
                 state.pending_action = Some(action.clone());
                 return Some(action);
             }
@@ -113,7 +111,7 @@ fn complete(
         ServerError::Pool("child exited but no pending action was recorded".into())
     })?;
 
-    let (project_id, slot_id) = match action {
+    let (project_id, slot_id) = match &action {
         PendingAction::Clone(p, s)
         | PendingAction::CloneSubmodules(p, s)
         | PendingAction::Update(p, s)
@@ -123,15 +121,14 @@ fn complete(
 
     let project_config = config
         .projects
-        .get(project_id.0)
-        .ok_or_else(|| ServerError::Pool(format!("no project at index {}", project_id.0)))?;
+        .iter()
+        .find(|p| p.name == *project_id)
+        .ok_or_else(|| ServerError::Pool(format!("no project named '{}'", project_id.0)))?;
 
     let project_state = state
         .projects
-        .get_mut(&project_config.name)
-        .ok_or_else(|| {
-            ServerError::Pool(format!("no state for project '{}'", project_config.name))
-        })?;
+        .get_mut(project_id)
+        .ok_or_else(|| ServerError::Pool(format!("no state for project '{}'", project_id.0)))?;
 
     let slot = project_state
         .slots
@@ -139,7 +136,7 @@ fn complete(
         .ok_or_else(|| {
             ServerError::Pool(format!(
                 "no slot {} in project '{}'",
-                slot_id.0, project_config.name
+                slot_id.0, project_config.name.0
             ))
         })?;
 
@@ -188,9 +185,10 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
         PendingAction::Clone(project_id, slot_id) => {
             let project = config
                 .projects
-                .get(project_id.0)
+                .iter()
+                .find(|p| p.name == *project_id)
                 .expect("invalid project_id");
-            let dest = clone_dest(repos_dir, &project.name, *slot_id);
+            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("clone")
@@ -204,9 +202,10 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
         PendingAction::CloneSubmodules(project_id, slot_id) => {
             let project = config
                 .projects
-                .get(project_id.0)
+                .iter()
+                .find(|p| p.name == *project_id)
                 .expect("invalid project_id");
-            let dest = clone_dest(repos_dir, &project.name, *slot_id);
+            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("submodule")
@@ -220,9 +219,10 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
         PendingAction::Update(project_id, slot_id) => {
             let project = config
                 .projects
-                .get(project_id.0)
+                .iter()
+                .find(|p| p.name == *project_id)
                 .expect("invalid project_id");
-            let dest = clone_dest(repos_dir, &project.name, *slot_id);
+            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("pull").arg("--ff-only").current_dir(&dest);
@@ -231,9 +231,10 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
         PendingAction::UpdateSubmodules(project_id, slot_id) => {
             let project = config
                 .projects
-                .get(project_id.0)
+                .iter()
+                .find(|p| p.name == *project_id)
                 .expect("invalid project_id");
-            let dest = clone_dest(repos_dir, &project.name, *slot_id);
+            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("submodule")
@@ -284,9 +285,11 @@ impl Handler for AidHandler<'_> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     use super::*;
     use crate::config::load_config;
+    use crate::state::ProjectId;
 
     fn load_test_config() -> Config {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -315,27 +318,30 @@ mod tests {
         let mut state = ServerState::default();
         let now = Utc::now();
 
+        let myproject = ProjectId(Rc::from("myproject"));
+        let other_project = ProjectId(Rc::from("other-project"));
+
         let expected = [
             // Initial clone wave
-            PendingAction::Clone(ProjectId(0), SlotId(0)),
-            PendingAction::Clone(ProjectId(0), SlotId(1)),
-            PendingAction::Clone(ProjectId(0), SlotId(2)),
-            PendingAction::CloneSubmodules(ProjectId(0), SlotId(0)),
-            PendingAction::CloneSubmodules(ProjectId(0), SlotId(1)),
-            PendingAction::CloneSubmodules(ProjectId(0), SlotId(2)),
-            PendingAction::Clone(ProjectId(1), SlotId(0)),
-            PendingAction::Clone(ProjectId(1), SlotId(1)),
+            PendingAction::Clone(myproject.clone(), SlotId(0)),
+            PendingAction::Clone(myproject.clone(), SlotId(1)),
+            PendingAction::Clone(myproject.clone(), SlotId(2)),
+            PendingAction::CloneSubmodules(myproject.clone(), SlotId(0)),
+            PendingAction::CloneSubmodules(myproject.clone(), SlotId(1)),
+            PendingAction::CloneSubmodules(myproject.clone(), SlotId(2)),
+            PendingAction::Clone(other_project.clone(), SlotId(0)),
+            PendingAction::Clone(other_project.clone(), SlotId(1)),
             // Update wave (last_refreshed=None so all slots are immediately stale)
             // project 0 has_submodules=true: Update → UpdatingSubmodules → UpdateSubmodules → Ready
-            PendingAction::Update(ProjectId(0), SlotId(0)),
-            PendingAction::Update(ProjectId(0), SlotId(1)),
-            PendingAction::Update(ProjectId(0), SlotId(2)),
-            PendingAction::UpdateSubmodules(ProjectId(0), SlotId(0)),
-            PendingAction::UpdateSubmodules(ProjectId(0), SlotId(1)),
-            PendingAction::UpdateSubmodules(ProjectId(0), SlotId(2)),
+            PendingAction::Update(myproject.clone(), SlotId(0)),
+            PendingAction::Update(myproject.clone(), SlotId(1)),
+            PendingAction::Update(myproject.clone(), SlotId(2)),
+            PendingAction::UpdateSubmodules(myproject.clone(), SlotId(0)),
+            PendingAction::UpdateSubmodules(myproject.clone(), SlotId(1)),
+            PendingAction::UpdateSubmodules(myproject.clone(), SlotId(2)),
             // project 1 has no submodules: Update → Ready directly
-            PendingAction::Update(ProjectId(1), SlotId(0)),
-            PendingAction::Update(ProjectId(1), SlotId(1)),
+            PendingAction::Update(other_project.clone(), SlotId(0)),
+            PendingAction::Update(other_project.clone(), SlotId(1)),
         ];
 
         for (step_num, want) in expected.into_iter().enumerate() {
@@ -355,12 +361,14 @@ mod tests {
                 assert_eq!(
                     s.status,
                     SlotStatus::Ready,
-                    "project '{name}' slot {:?}",
+                    "project '{:?}' slot {:?}",
+                    name,
                     s.id
                 );
                 assert!(
                     s.last_refreshed.is_some(),
-                    "project '{name}' slot {:?} should have last_refreshed set",
+                    "project '{:?}' slot {:?} should have last_refreshed set",
+                    name,
                     s.id
                 );
             }
