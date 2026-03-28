@@ -7,7 +7,9 @@ use tracing::info;
 use crate::config::Config;
 use crate::error::{Result, ServerError};
 use crate::poll_loop::{ChildExit, Handler};
-use crate::state::{Paths, PendingAction, ProjectState, ServerState, Slot, SlotId, SlotStatus};
+use crate::state::{
+    Paths, PendingAction, ProjectState, ServerState, Slot, SlotId, SlotStatus, StepId,
+};
 
 /// Ensure every project in `config` has been allocated and has enough slots
 fn initialize(state: &mut ServerState, config: &Config) {
@@ -89,6 +91,30 @@ fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<Pend
         }
     }
 
+    // Prioritize all updates before any builds
+    for project_config in &config.projects {
+        let project_state = state.projects.get(&project_config.name).unwrap();
+        if project_config.build_command.is_some() {
+            for slot in &project_state.slots {
+                let next_step_id = if slot.status == SlotStatus::WaitingToBuild {
+                    Some(0)
+                } else if let SlotStatus::Built(step_id) = slot.status {
+                    Some(step_id.0 + 1)
+                } else {
+                    None
+                };
+
+                if let Some(s) = next_step_id {
+                    return Some(PendingAction::Build(
+                        project_config.name.clone(),
+                        slot.id,
+                        StepId(s),
+                    ));
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -152,17 +178,35 @@ fn complete(
             ) => {
                 if project_config.has_submodules {
                     slot.status = SlotStatus::PartiallyUpdated;
+                } else if project_config.build_command.is_some() {
+                    slot.status = SlotStatus::Built(StepId(0));
                 } else {
                     slot.status = SlotStatus::Ready;
                     slot.last_refreshed = Some(now);
                 }
             }
             (SlotStatus::PartiallyUpdated, PendingAction::UpdateSubmodules(_, _)) => {
-                slot.status = SlotStatus::Ready;
-                slot.last_refreshed = Some(now);
+                if project_config.build_command.is_some() {
+                    slot.status = SlotStatus::WaitingToBuild;
+                } else {
+                    slot.status = SlotStatus::Ready;
+                    slot.last_refreshed = Some(now);
+                }
             }
-            (_, PendingAction::Build(_, _, _)) => {
-                todo!()
+            (
+                SlotStatus::WaitingToBuild | SlotStatus::Built(_),
+                PendingAction::Build(_, _, step_id),
+            ) => {
+                let n_steps = project_config
+                    .build_command
+                    .as_ref()
+                    .map_or(0, |s| s.0.len());
+                if step_id.0 + 1 < n_steps {
+                    slot.status = SlotStatus::Built(StepId(step_id.0));
+                } else {
+                    slot.status = SlotStatus::Ready;
+                    slot.last_refreshed = Some(now);
+                }
             }
             (status, other) => return Err(illegal_transition(status, &other)),
         }
@@ -244,7 +288,24 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
                 .current_dir(&dest);
             cmd
         }
-        PendingAction::Build(_, _, _) => todo!(),
+        PendingAction::Build(project_id, slot_id, step_id) => {
+            let project = config
+                .projects
+                .iter()
+                .find(|p| p.name == *project_id)
+                .expect("invalid project_id");
+            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
+            let steps = project
+                .build_command
+                .as_ref()
+                .expect("Build action requires build_command");
+            let step_str = &steps.0[step_id.0];
+            let mut parts = step_str.split_whitespace();
+            let program = parts.next().expect("build step must not be empty");
+            let mut cmd = Command::new(program);
+            cmd.args(parts).current_dir(&dest);
+            cmd
+        }
     }
 }
 
@@ -292,7 +353,7 @@ mod tests {
 
     use super::*;
     use crate::config::load_config;
-    use crate::state::ProjectId;
+    use crate::state::{ProjectId, StepId};
 
     fn load_test_config() -> Config {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -347,16 +408,27 @@ mod tests {
             PendingAction::Clone(other_project.clone(), SlotId(0)),
             PendingAction::Clone(other_project.clone(), SlotId(1)),
             // Update wave (last_refreshed=None so all slots are immediately stale)
-            // myproject has_submodules=true: Update → Updated → UpdateSubmodules → Ready
+            // myproject has_submodules=true: Update → PartiallyUpdated → UpdateSubmodules → Building → Ready
             PendingAction::Update(myproject.clone(), SlotId(0)),
             PendingAction::Update(myproject.clone(), SlotId(1)),
             PendingAction::Update(myproject.clone(), SlotId(2)),
             PendingAction::UpdateSubmodules(myproject.clone(), SlotId(0)),
             PendingAction::UpdateSubmodules(myproject.clone(), SlotId(1)),
             PendingAction::UpdateSubmodules(myproject.clone(), SlotId(2)),
-            // other-project has no submodules: Update → Ready directly
+            // other-project has no submodules and no build_command: Update → Ready directly
             PendingAction::Update(other_project.clone(), SlotId(0)),
             PendingAction::Update(other_project.clone(), SlotId(1)),
+            // myproject has build_command with 3 steps: each slot runs all steps before the next slot starts
+            // (step() scans slots in order, so slot 0 progresses through all steps first)
+            PendingAction::Build(myproject.clone(), SlotId(0), StepId(0)),
+            PendingAction::Build(myproject.clone(), SlotId(0), StepId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(0), StepId(2)),
+            PendingAction::Build(myproject.clone(), SlotId(1), StepId(0)),
+            PendingAction::Build(myproject.clone(), SlotId(1), StepId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(1), StepId(2)),
+            PendingAction::Build(myproject.clone(), SlotId(2), StepId(0)),
+            PendingAction::Build(myproject.clone(), SlotId(2), StepId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(2), StepId(2)),
         ];
 
         for (step_num, want) in expected.into_iter().enumerate() {
