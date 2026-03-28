@@ -52,12 +52,10 @@ impl Paths {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotStatus {
-    Cloning,
+    Uninitialized,
     Cloned,
-    CloningSubmodules,
     SubmodulesCloned,
-    Updating,
-    UpdatingSubmodules,
+    PartiallyUpdated,
     Building,
     Ready,
     CheckedOut,

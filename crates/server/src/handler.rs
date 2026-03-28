@@ -7,67 +7,65 @@ use tracing::info;
 use crate::config::Config;
 use crate::error::{Result, ServerError};
 use crate::poll_loop::{ChildExit, Handler};
-use crate::state::{Paths, PendingAction, ServerState, Slot, SlotId, SlotStatus};
+use crate::state::{Paths, PendingAction, ProjectState, ServerState, Slot, SlotId, SlotStatus};
+
+/// Ensure every project in `config` has been allocated and has enough slots
+fn initialize(state: &mut ServerState, config: &Config) {
+    for project_config in &config.projects {
+        let nslots = config.nslots(project_config) as usize;
+
+        let project_state: &mut ProjectState = state
+            .projects
+            .entry(project_config.name.clone())
+            .or_default();
+
+        while project_state.available_slots().len() < nslots {
+            let slot_id = SlotId(project_state.next_free_slot_number());
+            project_state.slots.push(Slot {
+                id: slot_id,
+                status: SlotStatus::Uninitialized,
+                last_refreshed: None,
+                checked_out_as: None,
+                error_message: None,
+            });
+        }
+    }
+}
 
 /// Inspect state and config and return the single most important action to take next.
-fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<PendingAction> {
-    // Don't start a new action while one is already running.
+fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<PendingAction> {
     if state.pending_action.is_some() {
         return None;
     }
 
     for project_config in &config.projects {
-        let nslots = config.nslots(project_config) as usize;
-
-        let project_state = state
-            .projects
-            .entry(project_config.name.clone())
-            .or_default();
-
-        let pool_count = project_state.available_slots().len();
-        if pool_count < nslots {
-            // Allocate the next slot number and immediately mark it as Cloning so
-            // subsequent idle ticks don't schedule a duplicate.
-            let slot_id = SlotId(project_state.next_free_slot_number());
-
-            project_state.slots.push(Slot {
-                id: slot_id,
-                status: SlotStatus::Cloning,
-                last_refreshed: None,
-                checked_out_as: None,
-                error_message: None,
-            });
-
-            let action = PendingAction::Clone(project_config.name.clone(), slot_id);
-            state.pending_action = Some(action.clone());
-            return Some(action);
+        let project_state = state.projects.get(&project_config.name).unwrap();
+        for slot in &project_state.slots {
+            if slot.status == SlotStatus::Uninitialized {
+                return Some(PendingAction::Clone(project_config.name.clone(), slot.id));
+            }
         }
 
         if project_config.has_submodules {
-            for slot in &mut project_state.slots {
+            for slot in &project_state.slots {
                 if slot.status == SlotStatus::Cloned {
-                    slot.status = SlotStatus::CloningSubmodules;
-                    let action =
-                        PendingAction::CloneSubmodules(project_config.name.clone(), slot.id);
-                    state.pending_action = Some(action.clone());
-                    return Some(action);
+                    return Some(PendingAction::CloneSubmodules(
+                        project_config.name.clone(),
+                        slot.id,
+                    ));
                 }
             }
         }
     }
 
-    // Update loop — only reached when all slots across all projects are fully cloned.
+    // Separate loop, to prefer cloning another repo before updating
     for project_config in &config.projects {
-        let project_state = state
-            .projects
-            .entry(project_config.name.clone())
-            .or_default();
-
-        for slot in &mut project_state.slots {
+        let project_state = state.projects.get(&project_config.name).unwrap();
+        for slot in &project_state.slots {
             let eligible = if project_config.has_submodules {
-                slot.status == SlotStatus::SubmodulesCloned
+                slot.status == SlotStatus::SubmodulesCloned || slot.status == SlotStatus::Ready
             } else {
-                slot.status == SlotStatus::Cloned
+                slot.status == SlotStatus::Cloned || slot.status == SlotStatus::Ready
             };
 
             let is_stale = slot.last_refreshed.is_none_or(|t| {
@@ -75,18 +73,18 @@ fn step(now: DateTime<Utc>, state: &mut ServerState, config: &Config) -> Option<
             });
 
             if eligible && is_stale {
-                slot.status = SlotStatus::Updating;
-                let action = PendingAction::Update(project_config.name.clone(), slot.id);
-                state.pending_action = Some(action.clone());
-                return Some(action);
+                return Some(PendingAction::Update(project_config.name.clone(), slot.id));
             }
         }
 
-        for slot in &mut project_state.slots {
-            if slot.status == SlotStatus::UpdatingSubmodules {
-                let action = PendingAction::UpdateSubmodules(project_config.name.clone(), slot.id);
-                state.pending_action = Some(action.clone());
-                return Some(action);
+        if project_config.has_submodules {
+            for slot in &project_state.slots {
+                if slot.status == SlotStatus::PartiallyUpdated {
+                    return Some(PendingAction::UpdateSubmodules(
+                        project_config.name.clone(),
+                        slot.id,
+                    ));
+                }
             }
         }
     }
@@ -142,21 +140,24 @@ fn complete(
 
     if result.success {
         match (&slot.status, action) {
-            (SlotStatus::Cloning, PendingAction::Clone(_, _)) => {
+            (SlotStatus::Uninitialized, PendingAction::Clone(_, _)) => {
                 slot.status = SlotStatus::Cloned;
             }
-            (SlotStatus::CloningSubmodules, PendingAction::CloneSubmodules(_, _)) => {
+            (SlotStatus::Cloned, PendingAction::CloneSubmodules(_, _)) => {
                 slot.status = SlotStatus::SubmodulesCloned;
             }
-            (SlotStatus::Updating, PendingAction::Update(_, _)) => {
+            (
+                SlotStatus::Cloned | SlotStatus::SubmodulesCloned | SlotStatus::Ready,
+                PendingAction::Update(_, _),
+            ) => {
                 if project_config.has_submodules {
-                    slot.status = SlotStatus::UpdatingSubmodules;
+                    slot.status = SlotStatus::PartiallyUpdated;
                 } else {
                     slot.status = SlotStatus::Ready;
                     slot.last_refreshed = Some(now);
                 }
             }
-            (SlotStatus::UpdatingSubmodules, PendingAction::UpdateSubmodules(_, _)) => {
+            (SlotStatus::PartiallyUpdated, PendingAction::UpdateSubmodules(_, _)) => {
                 slot.status = SlotStatus::Ready;
                 slot.last_refreshed = Some(now);
             }
@@ -277,7 +278,9 @@ impl Handler for AidHandler<'_> {
     }
 
     fn on_idle(&mut self, now: DateTime<Utc>) -> Option<Command> {
-        let action = step(now, &mut self.state, &self.config)?;
+        initialize(&mut self.state, &self.config);
+        let action = step(now, &self.state, &self.config)?;
+        self.state.pending_action = Some(action.clone());
         Some(to_command(&self.config, &self.paths.repos_dir, &action))
     }
 }
@@ -296,6 +299,18 @@ mod tests {
             .join("testdata")
             .join("config.toml");
         load_config(&path).expect("testdata/config.toml should parse cleanly")
+    }
+
+    /// Mirrors the logic of `on_idle`: initialize, step, set pending_action.
+    fn simulate_step(
+        state: &mut ServerState,
+        config: &Config,
+        now: DateTime<Utc>,
+    ) -> Option<PendingAction> {
+        initialize(state, config);
+        let action = step(now, state, config)?;
+        state.pending_action = Some(action.clone());
+        Some(action)
     }
 
     fn simulate_success(state: &mut ServerState, config: &Config, now: DateTime<Utc>) {
@@ -332,27 +347,27 @@ mod tests {
             PendingAction::Clone(other_project.clone(), SlotId(0)),
             PendingAction::Clone(other_project.clone(), SlotId(1)),
             // Update wave (last_refreshed=None so all slots are immediately stale)
-            // project 0 has_submodules=true: Update → UpdatingSubmodules → UpdateSubmodules → Ready
+            // myproject has_submodules=true: Update → Updated → UpdateSubmodules → Ready
             PendingAction::Update(myproject.clone(), SlotId(0)),
             PendingAction::Update(myproject.clone(), SlotId(1)),
             PendingAction::Update(myproject.clone(), SlotId(2)),
             PendingAction::UpdateSubmodules(myproject.clone(), SlotId(0)),
             PendingAction::UpdateSubmodules(myproject.clone(), SlotId(1)),
             PendingAction::UpdateSubmodules(myproject.clone(), SlotId(2)),
-            // project 1 has no submodules: Update → Ready directly
+            // other-project has no submodules: Update → Ready directly
             PendingAction::Update(other_project.clone(), SlotId(0)),
             PendingAction::Update(other_project.clone(), SlotId(1)),
         ];
 
         for (step_num, want) in expected.into_iter().enumerate() {
-            let action = step(now, &mut state, &config)
+            let action = simulate_step(&mut state, &config, now)
                 .unwrap_or_else(|| panic!("step {step_num}: expected action, got None"));
             assert_eq!(action, want, "step {step_num}");
             simulate_success(&mut state, &config, now);
         }
 
         assert!(
-            step(now, &mut state, &config).is_none(),
+            simulate_step(&mut state, &config, now).is_none(),
             "all pools full: expected None"
         );
 
