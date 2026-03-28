@@ -30,6 +30,13 @@ pub struct Config {
     pub projects: Vec<ProjectConfig>,
 }
 
+impl Config {
+    #[must_use]
+    pub fn project_config(&self, id: &ProjectId) -> Option<&ProjectConfig> {
+        self.projects.iter().find(|p| p.name == *id)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectConfig {
     pub name: ProjectId,

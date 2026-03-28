@@ -228,11 +228,7 @@ fn clone_dest(repos_dir: &Path, project_name: &str, slot_id: SlotId) -> PathBuf 
 fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Command {
     match action {
         PendingAction::Clone(project_id, slot_id) => {
-            let project = config
-                .projects
-                .iter()
-                .find(|p| p.name == *project_id)
-                .expect("invalid project_id");
+            let project = config.project_config(project_id).unwrap();
             let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
@@ -245,11 +241,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
             cmd
         }
         PendingAction::CloneSubmodules(project_id, slot_id) => {
-            let project = config
-                .projects
-                .iter()
-                .find(|p| p.name == *project_id)
-                .expect("invalid project_id");
+            let project = config.project_config(project_id).unwrap();
             let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
@@ -262,11 +254,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
             cmd
         }
         PendingAction::Update(project_id, slot_id) => {
-            let project = config
-                .projects
-                .iter()
-                .find(|p| p.name == *project_id)
-                .expect("invalid project_id");
+            let project = config.project_config(project_id).unwrap();
             let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
@@ -274,11 +262,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
             cmd
         }
         PendingAction::UpdateSubmodules(project_id, slot_id) => {
-            let project = config
-                .projects
-                .iter()
-                .find(|p| p.name == *project_id)
-                .expect("invalid project_id");
+            let project = config.project_config(project_id).unwrap();
             let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
 
             let mut cmd = Command::new("git");
@@ -289,11 +273,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
             cmd
         }
         PendingAction::Build(project_id, slot_id, step_id) => {
-            let project = config
-                .projects
-                .iter()
-                .find(|p| p.name == *project_id)
-                .expect("invalid project_id");
+            let project = config.project_config(project_id).unwrap();
             let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
             let steps = project
                 .build_command

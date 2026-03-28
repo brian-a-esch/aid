@@ -32,7 +32,6 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-agent = { path = "crates/agent" }
 server = { path = "crates/server" }
 anyhow.workspace = true
 
