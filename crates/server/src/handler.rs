@@ -21,7 +21,7 @@ fn initialize(state: &mut ServerState, config: &Config) {
             .entry(project_config.name.clone())
             .or_default();
 
-        while project_state.available_slots().len() < nslots {
+        while project_state.available_slots().count() < nslots {
             let slot_id = SlotId(project_state.next_free_slot_number());
             project_state.slots.push(Slot {
                 id: slot_id,
@@ -42,7 +42,7 @@ fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<Pend
 
     for project_config in &config.projects {
         let project_state = state.projects.get(&project_config.name).unwrap();
-        for slot in &project_state.slots {
+        for slot in project_state.available_slots() {
             if slot.status == SlotStatus::Uninitialized {
                 return Some(PendingAction::Clone(project_config.name.clone(), slot.id));
             }
@@ -63,7 +63,7 @@ fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<Pend
     // Separate loop, to prefer cloning another repo before updating
     for project_config in &config.projects {
         let project_state = state.projects.get(&project_config.name).unwrap();
-        for slot in &project_state.slots {
+        for slot in project_state.available_slots() {
             let eligible = if project_config.has_submodules {
                 slot.status == SlotStatus::SubmodulesCloned || slot.status == SlotStatus::Ready
             } else {
@@ -80,7 +80,7 @@ fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<Pend
         }
 
         if project_config.has_submodules {
-            for slot in &project_state.slots {
+            for slot in project_state.available_slots() {
                 if slot.status == SlotStatus::PartiallyUpdated {
                     return Some(PendingAction::UpdateSubmodules(
                         project_config.name.clone(),
@@ -95,7 +95,7 @@ fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<Pend
     for project_config in &config.projects {
         let project_state = state.projects.get(&project_config.name).unwrap();
         if project_config.build_command.is_some() {
-            for slot in &project_state.slots {
+            for slot in project_state.available_slots() {
                 let next_step_id = if slot.status == SlotStatus::WaitingToBuild {
                     Some(0)
                 } else if let SlotStatus::Built(step_id) = slot.status {
@@ -438,6 +438,57 @@ mod tests {
                     name,
                     s.id
                 );
+            }
+        }
+
+        // --- Phase 2: check out myproject slot 0, advance time, verify update cycle re-queues ---
+        let myproject_state = state.projects.get_mut(&myproject).unwrap();
+        myproject_state.slots[0].status = SlotStatus::CheckedOut;
+        myproject_state.slots[0].checked_out_as = Some("user1".into());
+        let now2 = now + chrono::Duration::seconds(1801);
+
+        let phase2 = [
+            PendingAction::Clone(myproject.clone(), SlotId(3)),
+            PendingAction::CloneSubmodules(myproject.clone(), SlotId(3)),
+            PendingAction::Update(myproject.clone(), SlotId(1)),
+            PendingAction::Update(myproject.clone(), SlotId(2)),
+            PendingAction::Update(myproject.clone(), SlotId(3)),
+            PendingAction::UpdateSubmodules(myproject.clone(), SlotId(1)),
+            PendingAction::UpdateSubmodules(myproject.clone(), SlotId(2)),
+            PendingAction::UpdateSubmodules(myproject.clone(), SlotId(3)),
+            PendingAction::Update(other_project.clone(), SlotId(0)),
+            PendingAction::Update(other_project.clone(), SlotId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(1), StepId(0)),
+            PendingAction::Build(myproject.clone(), SlotId(1), StepId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(1), StepId(2)),
+            PendingAction::Build(myproject.clone(), SlotId(2), StepId(0)),
+            PendingAction::Build(myproject.clone(), SlotId(2), StepId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(2), StepId(2)),
+            PendingAction::Build(myproject.clone(), SlotId(3), StepId(0)),
+            PendingAction::Build(myproject.clone(), SlotId(3), StepId(1)),
+            PendingAction::Build(myproject.clone(), SlotId(3), StepId(2)),
+        ];
+        for (step_num, want) in phase2.into_iter().enumerate() {
+            let action = simulate_step(&mut state, &config, now2)
+                .unwrap_or_else(|| panic!("phase2 step {step_num}: expected action, got None"));
+            assert_eq!(action, want, "phase2 step {step_num}");
+            simulate_success(&mut state, &config, now2);
+        }
+        assert!(
+            simulate_step(&mut state, &config, now2).is_none(),
+            "after phase2: expected None"
+        );
+
+        for (name, p) in &state.projects {
+            for s in p.slots.iter() {
+                let expected = if *name == myproject && s.id == SlotId(0) {
+                    (SlotStatus::CheckedOut, now)
+                } else {
+                    (SlotStatus::Ready, now2)
+                };
+
+                assert_eq!(s.status, expected.0, "project '{:?}' slot {:?}", name, s.id);
+                assert_eq!(s.last_refreshed.unwrap(), expected.1);
             }
         }
     }

@@ -83,22 +83,14 @@ impl ProjectState {
         self.slots.iter().map(|s| s.id).max().map_or(0, |n| n.0 + 1)
     }
 
-    #[must_use]
-    // TODO turn into iterable
-    pub fn ready_slots(&self) -> Vec<&Slot> {
-        self.slots
-            .iter()
-            .filter(|s| s.status == SlotStatus::Ready)
-            .collect()
+    pub fn ready_slots(&self) -> impl Iterator<Item = &Slot> {
+        self.slots.iter().filter(|s| s.status == SlotStatus::Ready)
     }
 
-    #[must_use]
-    // TODO turn into iterable
-    pub fn available_slots(&self) -> Vec<&Slot> {
+    pub fn available_slots(&self) -> impl Iterator<Item = &Slot> {
         self.slots
             .iter()
             .filter(|s| s.status != SlotStatus::CheckedOut)
-            .collect()
     }
 }
 
