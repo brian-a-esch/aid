@@ -1,7 +1,14 @@
 use server::state::Paths;
 use std::os::fd::AsRawFd;
+use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("server") => {

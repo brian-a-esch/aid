@@ -314,6 +314,10 @@ impl Handler for AidHandler<'_> {
     }
 
     fn handle_child_exit(&mut self, now: DateTime<Utc>, result: ChildExit) {
+        info!(
+            "child process exited for action {:?}",
+            self.state.pending_action
+        );
         complete(now, &mut self.state, &self.config, &result)
             .expect("failed to apply completed action to state");
     }
@@ -321,6 +325,7 @@ impl Handler for AidHandler<'_> {
     fn on_idle(&mut self, now: DateTime<Utc>) -> Option<Command> {
         initialize(&mut self.state, &self.config);
         let action = step(now, &self.state, &self.config)?;
+        info!("queued action {:?}", self.state.pending_action);
         self.state.pending_action = Some(action.clone());
         Some(to_command(&self.config, &self.paths.repos_dir, &action))
     }

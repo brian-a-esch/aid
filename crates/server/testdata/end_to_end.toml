@@ -1,0 +1,9 @@
+nslots = 1
+refresh_interval_secs = 9999
+
+[[projects]]
+name = "test-project"
+# N.B. this is a placeholder and the test overrides this with the proper tempdir
+repo_url = "__REPO_URL__"
+branch = "main"
+nslots = 1

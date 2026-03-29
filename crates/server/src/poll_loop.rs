@@ -278,6 +278,13 @@ impl<H: Handler> EventLoop<H> {
     pub fn run(&mut self) -> std::io::Result<()> {
         info!("event loop running");
 
+        let mut now = Utc::now();
+        // Start an initial task, if any can be done, makes sure end to end tests run quickly
+        assert!(self.running_child.is_none());
+        if let Some(cmd) = self.handler.on_idle(now) {
+            self.start_child(now, cmd);
+        }
+
         while !self.shutting_down {
             self.prep_pollfds();
 
@@ -297,7 +304,7 @@ impl<H: Handler> EventLoop<H> {
                 return Err(err);
             }
 
-            let now = Utc::now();
+            now = Utc::now();
             self.dispatch_poll_results(now);
 
             // Ask the handler for work if idle

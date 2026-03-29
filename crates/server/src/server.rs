@@ -2,7 +2,6 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::config::{self};
 use crate::error::{Result, ServerError};
@@ -11,12 +10,6 @@ use crate::poll_loop;
 use crate::state::{self, Paths};
 
 pub fn run(paths: &Paths, shutdown_fd: OwnedFd, sigchild_fd: OwnedFd) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     info!("starting aid server");
 
     // Ensure data directories exist
