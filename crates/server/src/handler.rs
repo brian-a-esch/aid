@@ -347,6 +347,13 @@ mod tests {
         load_config(&path).expect("testdata/config.toml should parse cleanly")
     }
 
+    fn load_build_error_config() -> Config {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join("build_error.toml");
+        load_config(&path).expect("testdata/build_error.toml should parse cleanly")
+    }
+
     /// Mirrors the logic of `on_idle`: initialize, step, set pending_action.
     fn simulate_step(
         state: &mut ServerState,
@@ -371,6 +378,67 @@ mod tests {
             },
         )
         .expect("complete should not fail in step sequence test");
+    }
+
+    fn simulate_failure(
+        state: &mut ServerState,
+        config: &Config,
+        now: DateTime<Utc>,
+        stderr: &str,
+    ) {
+        complete(
+            now,
+            state,
+            config,
+            &ChildExit {
+                success: false,
+                stdout: vec![],
+                stderr: stderr.as_bytes().to_vec(),
+            },
+        )
+        .expect("complete should not fail on child failure");
+    }
+
+    #[test]
+    fn build_failure_errors_slot() {
+        let config = load_build_error_config();
+        let mut state = ServerState::default();
+        let now = Utc::now();
+        let p = ProjectId(Rc::from("myproject"));
+
+        let steps = [
+            PendingAction::Clone(p.clone(), SlotId(0)),
+            PendingAction::Clone(p.clone(), SlotId(1)),
+            PendingAction::Update(p.clone(), SlotId(0)),
+            PendingAction::Update(p.clone(), SlotId(1)),
+            // This step fails for some reason
+            PendingAction::Build(p.clone(), SlotId(0), StepId(1)),
+            PendingAction::Build(p.clone(), SlotId(1), StepId(1)),
+        ];
+
+        for (i, expected) in steps.into_iter().enumerate() {
+            let action = simulate_step(&mut state, &config, now)
+                .unwrap_or_else(|| panic!("step {i}: expected action, got None"));
+            assert_eq!(action, expected, "step {i}");
+            if i == 4 {
+                simulate_failure(&mut state, &config, now, "whoops");
+            } else {
+                simulate_success(&mut state, &config, now);
+            }
+        }
+
+        // Slot 0 must be Error with the captured stderr
+        let slot0 = &state.projects[&p].slots[0];
+        assert_eq!(slot0.status, SlotStatus::Error);
+        assert_eq!(slot0.error_message.as_deref(), Some("whoops"));
+
+        assert_eq!(state.projects[&p].slots[1].status, SlotStatus::Ready);
+
+        // Errored slot must not be rescheduled; no other work pending
+        assert!(
+            simulate_step(&mut state, &config, now).is_none(),
+            "errored slot must not be rescheduled; no other work should be queued"
+        );
     }
 
     #[test]
