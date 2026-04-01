@@ -30,8 +30,8 @@ aid list
 # lists the actively checked out projects
 aid list --active
 
-# lists the background projects & their status (last pull time, build, etc)
-aid list --backgorund
+# lists the available projects & their status (last pull time, build, etc)
+aid list --free
 
 # remove a project the user is done with, double checks that there are no local changes
 aid rm <checkout_name> 
@@ -78,12 +78,9 @@ repo_url = "https://github.com/org/other"
 ```
 
 ### Issues
-- Need tests
-- refresh_slot git update command is not ideal
-- No submodule support
 - Need to have error model in place for when repo update or build fails. A
   retry loop for poll makes sense. Build failing once seems like it should be
-  an error. Initial clone failing seems like a problem. Regardless, repos in an
+  an error. Initial clone failing seems like a problem. For now, a repo in an
   error'ed state need to stop having work done, but count against our project
   quota
 - Add handshake with protocol version & reject clients with wrong version
