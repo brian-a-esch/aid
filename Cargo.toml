@@ -19,6 +19,7 @@ toml = "0.8"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
+git2 = "0.20"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"

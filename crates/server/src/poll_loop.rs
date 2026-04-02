@@ -1,3 +1,4 @@
+use crate::error::{Result, ServerError};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -94,7 +95,7 @@ pub struct ChildExit {
 pub trait Handler {
     /// Called with a complete newline-delimited message from a client.
     /// Return the response bytes to send back (should include trailing newline).
-    fn handle_message(&mut self, now: DateTime<Utc>, msg: &[u8]) -> Vec<u8>;
+    fn handle_message(&mut self, now: DateTime<Utc>, msg: &[u8]) -> Result<Vec<u8>>;
 
     /// Called when a spawned child process exits.
     fn handle_child_exit(&mut self, now: DateTime<Utc>, result: ChildExit);
@@ -127,7 +128,11 @@ impl Client {
         self.write_buf.extend(data);
     }
 
-    fn process_client_lines<H: Handler>(&mut self, now: DateTime<Utc>, handler: &mut H) {
+    fn process_client_lines<H: Handler>(
+        &mut self,
+        now: DateTime<Utc>,
+        handler: &mut H,
+    ) -> Result<()> {
         let lines = {
             let mut lines = Vec::new();
             loop {
@@ -140,9 +145,11 @@ impl Client {
         };
 
         for line in lines {
-            let response = handler.handle_message(now, &line);
+            let response = handler.handle_message(now, &line)?;
+            // TODO we should try and write immediately
             self.enqueue_bytes(&response);
         }
+        Ok(())
     }
 
     fn handle_client_writable(&mut self) -> std::io::Result<()> {
@@ -167,21 +174,21 @@ impl Client {
         &mut self,
         now: DateTime<Utc>,
         handler: &mut H,
-    ) -> std::io::Result<()> {
-        // TODO cleanup
+    ) -> Result<()> {
+        // TODO cleanup this tmp_buf, should use the event loop buffer
         let mut tmp_buf = [0u8; 4960];
         loop {
             match self.stream.read(&mut tmp_buf) {
-                Ok(0) => return Err(std::io::ErrorKind::ConnectionReset.into()),
+                Ok(0) => return Err(ServerError::Io(std::io::ErrorKind::ConnectionReset.into())),
                 Ok(n) => {
                     self.read_buf.extend_from_slice(&tmp_buf[..n]);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
+                Err(e) => return Err(ServerError::Io(e)),
             }
         }
 
-        self.process_client_lines(now, handler);
+        self.process_client_lines(now, handler)?;
         Ok(())
     }
 }
@@ -209,6 +216,7 @@ pub struct EventLoop<H: Handler> {
     listener: UnixListener,
     signal_fd: OwnedFd,
     sigchild_fd: OwnedFd,
+    // TODO change to OwnedFd
     clients: HashMap<RawFd, Client>,
     running_child: Option<RunningChild>,
     poll_fds: Vec<libc::pollfd>,
@@ -609,24 +617,24 @@ mod tests {
     }
 
     impl Handler for PingPong {
-        fn handle_message(&mut self, _now: DateTime<Utc>, msg: &[u8]) -> Vec<u8> {
+        fn handle_message(&mut self, _now: DateTime<Utc>, msg: &[u8]) -> Result<Vec<u8>> {
             self.messages_received += 1;
             let text = String::from_utf8_lossy(msg);
             let trimmed = text.trim();
             if trimmed == "child_done?" {
                 if self.child_done {
-                    b"yes\n".to_vec()
+                    Ok(b"yes\n".to_vec())
                 } else {
-                    b"no\n".to_vec()
+                    Ok(b"no\n".to_vec())
                 }
             } else if trimmed == "ping" {
                 if self.child_done {
-                    b"pong\npong\n".to_vec()
+                    Ok(b"pong\npong\n".to_vec())
                 } else {
-                    b"pong\n".to_vec()
+                    Ok(b"pong\n".to_vec())
                 }
             } else {
-                format!("echo: {trimmed}\n").into_bytes()
+                Ok(format!("echo: {trimmed}\n").into_bytes())
             }
         }
 

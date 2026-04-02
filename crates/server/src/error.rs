@@ -22,7 +22,7 @@ pub enum ServerError {
     Pool(String),
 
     #[error("git error: {0}")]
-    Git(String),
+    Git(#[from] git2::Error),
 
     #[error("build error: {0}")]
     Build(String),

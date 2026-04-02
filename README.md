@@ -38,12 +38,6 @@ aid rm <checkout_name>
 
 # skips the double check
 aid rm --force <checkout_name>
-
-# removes extra background directories so we get down to
-aid cleanup
-
-# removes all background directories
-aid purge
 ```
 
 ### Configuration

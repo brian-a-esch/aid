@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use api::SlotStatusSummary;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +64,22 @@ pub enum SlotStatus {
     Error,
 }
 
+impl SlotStatus {
+    #[must_use]
+    pub fn to_api(&self) -> SlotStatusSummary {
+        match self {
+            SlotStatus::Uninitialized => SlotStatusSummary::Uninitialized,
+            SlotStatus::Cloned | SlotStatus::SubmodulesCloned | SlotStatus::PartiallyUpdated => {
+                SlotStatusSummary::Cloning
+            }
+            SlotStatus::WaitingToBuild | SlotStatus::Built(_) => SlotStatusSummary::Building,
+            SlotStatus::Ready => SlotStatusSummary::Ready,
+            SlotStatus::CheckedOut => SlotStatusSummary::CheckedOut,
+            SlotStatus::Error => SlotStatusSummary::Error,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Slot {
     pub id: SlotId,
@@ -91,6 +108,12 @@ impl ProjectState {
         self.slots
             .iter()
             .filter(|s| s.status != SlotStatus::CheckedOut)
+    }
+
+    pub fn checked_out_slots(&self) -> impl Iterator<Item = &Slot> {
+        self.slots
+            .iter()
+            .filter(|s| s.status == SlotStatus::CheckedOut)
     }
 }
 

@@ -1,15 +1,47 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
-use tracing::info;
+use tracing::{info, warn};
+
+use api::{Envelope, ListFilter, PROTOCOL_VERSION, Request, Response, ResponseEnvelope, SlotInfo};
 
 use crate::config::Config;
 use crate::error::{Result, ServerError};
 use crate::poll_loop::{ChildExit, Handler};
 use crate::state::{
-    Paths, PendingAction, ProjectState, ServerState, Slot, SlotId, SlotStatus, StepId,
+    Paths, PendingAction, ProjectId, ProjectState, ServerState, Slot, SlotId, SlotStatus, StepId,
 };
+
+mod git_helpers {
+    use git2::{Repository, StatusOptions};
+
+    use super::Result;
+
+    pub fn is_dirty(repo: &Repository) -> Result<bool> {
+        let mut opts = StatusOptions::new();
+        opts.include_untracked(true).recurse_untracked_dirs(true);
+
+        let statuses = repo.statuses(Some(&mut opts))?;
+        Ok(!statuses.is_empty())
+    }
+
+    pub fn has_unpushed(repo: &Repository) -> Result<bool> {
+        let head = repo.head()?;
+        let local_oid = head.peel_to_commit()?.id();
+
+        let local_branch = head.shorthand().unwrap_or("HEAD");
+        let branch = repo.find_branch(local_branch, git2::BranchType::Local)?;
+
+        let Ok(upstream) = branch.upstream() else {
+            return Ok(true); // no upstream configured — treat as unpushed
+        };
+
+        let remote_oid = upstream.get().peel_to_commit()?.id();
+        Ok(local_oid != remote_oid)
+    }
+}
 
 /// Ensure every project in `config` has been allocated and has enough slots
 fn initialize(state: &mut ServerState, config: &Config) {
@@ -306,11 +338,182 @@ impl<'a> AidHandler<'a> {
     }
 }
 
+fn handle_add(
+    project_name: &str,
+    checkout_name: String,
+    state: &mut ServerState,
+    paths: &Paths,
+) -> Response {
+    let key = ProjectId(project_name.into());
+    let Some(project_state) = state.projects.get_mut(&key) else {
+        return Response::Error {
+            message: format!("unknown project '{project_name}'"),
+        };
+    };
+
+    let Some(slot) = project_state
+        .slots
+        .iter_mut()
+        .find(|s| s.status == SlotStatus::Ready)
+    else {
+        return Response::Error {
+            message: format!("no ready slot available for project '{project_name}'"),
+        };
+    };
+
+    slot.status = SlotStatus::CheckedOut;
+    slot.checked_out_as = Some(checkout_name.clone());
+
+    let path = paths
+        .repos_dir
+        .join(project_name)
+        .join(slot.id.0.to_string())
+        .to_string_lossy()
+        .into_owned();
+
+    info!(
+        "checked out project '{}' slot {} as '{}'",
+        project_name, slot.id.0, checkout_name
+    );
+
+    Response::Added {
+        checkout_name,
+        path,
+    }
+}
+
+/// Build a flat `SlotInfo` from a project name + `Slot`.
+fn slot_info(project: &str, slot: &Slot) -> SlotInfo {
+    SlotInfo {
+        project: project.to_string(),
+        checkout_name: slot.checked_out_as.clone(),
+        status: slot.status.to_api(),
+        last_refreshed: slot
+            .last_refreshed
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        error_message: slot.error_message.clone(),
+    }
+}
+
+fn handle_list(filter: &ListFilter, state: &ServerState) -> Response {
+    let slots: Vec<SlotInfo> = state
+        .projects
+        .iter()
+        .flat_map(|(project_id, project_state)| {
+            project_state
+                .slots
+                .iter()
+                .filter(|slot| match filter {
+                    ListFilter::All => true,
+                    ListFilter::Active => slot.status == SlotStatus::CheckedOut,
+                    ListFilter::Free => slot.status == SlotStatus::Ready,
+                })
+                .map(|slot| slot_info(&project_id.0, slot))
+        })
+        .collect();
+
+    Response::List(slots)
+}
+
+fn handle_remove(
+    now: DateTime<Utc>,
+    checkout_name: &str,
+    force: bool,
+    state: &mut ServerState,
+    paths: &Paths,
+) -> Result<Response> {
+    // Find the slot by checkout_name across all projects.
+    let project_id = ProjectId(Rc::from("myproject"));
+    let found = state
+        .projects
+        .get_mut(&project_id)
+        .and_then(|project_state| {
+            project_state.slots.iter_mut().find(|s| {
+                s.status == SlotStatus::CheckedOut
+                    && s.checked_out_as.as_deref() == Some(checkout_name)
+            })
+        });
+    let Some(slot) = found else {
+        return Ok(Response::Error {
+            message: format!(
+                "no checked-out slot named '{checkout_name} for project {}'",
+                project_id.0
+            ),
+        });
+    };
+
+    let repo_path = clone_dest(&paths.repos_dir, &project_id.0, slot.id);
+    if force {
+        // TODO if we're in force, but the repo is dirty, when we return it pull will fail. I am a
+        // little nervous about just blowing away the directory
+        warn!("force removing repo at {:?}", repo_path);
+    } else {
+        let repo = git2::Repository::open(repo_path)?;
+        let dirty = git_helpers::is_dirty(&repo)?;
+        if dirty {
+            return Ok(Response::Error {
+                message: "repo is still dirty, cannot return".to_string(),
+            });
+        }
+        let unpushed = git_helpers::has_unpushed(&repo)?;
+        if unpushed {
+            return Ok(Response::Error {
+                message: "repo is has unpushed commits".to_string(),
+            });
+        }
+    }
+
+    info!(
+        "returning slot (checkout '{}') to the pool (force={})",
+        checkout_name, force
+    );
+
+    slot.status = SlotStatus::Ready;
+    slot.checked_out_as = None;
+    slot.last_refreshed = Some(now);
+
+    Ok(Response::Ok)
+}
+
 impl Handler for AidHandler<'_> {
-    fn handle_message(&mut self, _now: DateTime<Utc>, msg: &[u8]) -> Vec<u8> {
-        let text = String::from_utf8_lossy(msg);
-        info!("received client message: {}", text.trim());
-        vec![]
+    fn handle_message(&mut self, now: DateTime<Utc>, msg: &[u8]) -> Result<Vec<u8>> {
+        // The event loop strips the trailing newline; we work with raw bytes.
+        let envelope = api::deserialize_request(msg)?;
+        info!(
+            "received request id='{}' type={:?}",
+            envelope.request_id, envelope.content
+        );
+
+        let payload = if envelope.version == PROTOCOL_VERSION {
+            match envelope.content {
+                Request::Add {
+                    project_name,
+                    checkout_name,
+                } => handle_add(&project_name, checkout_name, &mut self.state, self.paths),
+                Request::List { filter } => handle_list(&filter, &self.state),
+                Request::Remove {
+                    checkout_name,
+                    force,
+                } => handle_remove(now, &checkout_name, force, &mut self.state, self.paths)?,
+            }
+        } else {
+            warn!(
+                "version mismatch: client sent {}, server expects {}",
+                envelope.version, PROTOCOL_VERSION
+            );
+            Response::VersionMismatch {
+                expected: PROTOCOL_VERSION,
+                got: envelope.version,
+            }
+        };
+
+        let resp: ResponseEnvelope = Envelope {
+            version: PROTOCOL_VERSION,
+            request_id: envelope.request_id,
+            content: payload,
+        };
+
+        Ok(api::serialize_response(&resp)?)
     }
 
     fn handle_child_exit(&mut self, now: DateTime<Utc>, result: ChildExit) {
