@@ -145,9 +145,12 @@ impl Client {
         };
 
         for line in lines {
-            let response = handler.handle_message(now, &line)?;
-            // TODO we should try and write immediately
-            self.enqueue_bytes(&response);
+            let mut response = handler.handle_message(now, &line)?;
+            if !response.is_empty() {
+                response.push(b'\n');
+                // TODO we should try and write immediately
+                self.enqueue_bytes(&response);
+            }
         }
         Ok(())
     }
@@ -623,18 +626,18 @@ mod tests {
             let trimmed = text.trim();
             if trimmed == "child_done?" {
                 if self.child_done {
-                    Ok(b"yes\n".to_vec())
+                    Ok(b"yes".to_vec())
                 } else {
-                    Ok(b"no\n".to_vec())
+                    Ok(b"no".to_vec())
                 }
             } else if trimmed == "ping" {
                 if self.child_done {
-                    Ok(b"pong\npong\n".to_vec())
+                    Ok(b"pong_pong".to_vec())
                 } else {
-                    Ok(b"pong\n".to_vec())
+                    Ok(b"pong".to_vec())
                 }
             } else {
-                Ok(format!("echo: {trimmed}\n").into_bytes())
+                Ok(format!("echo: {trimmed}").into_bytes())
             }
         }
 
@@ -752,10 +755,7 @@ mod tests {
             line.clear();
             stream.write_all(b"ping\n").expect("write");
             reader.read_line(&mut line).expect("read");
-            assert_eq!(line.trim(), "pong");
-            line.clear();
-            reader.read_line(&mut line).expect("read");
-            assert_eq!(line.trim(), "pong");
+            assert_eq!(line.trim(), "pong_pong");
 
             signal_shutdown(&sig_write);
         });
