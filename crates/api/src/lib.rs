@@ -1,5 +1,7 @@
 pub const PROTOCOL_VERSION: u32 = 1;
 
+use std::rc::Rc;
+
 use serde::{Deserialize, Serialize};
 
 /// Filter applied to the `List` command.
@@ -47,7 +49,7 @@ pub enum SlotStatusSummary {
 /// A flat, serialization-friendly view of a slot shown in list responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotInfo {
-    pub project: String,
+    pub project: Rc<str>,
     /// Set when the slot is currently checked out.
     pub checkout_name: Option<String>,
     pub status: SlotStatusSummary,

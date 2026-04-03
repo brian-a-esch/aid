@@ -59,7 +59,6 @@ fn initialize(state: &mut ServerState, config: &Config) {
                 id: slot_id,
                 status: SlotStatus::Uninitialized,
                 last_refreshed: None,
-                checked_out_as: None,
                 error_message: None,
             });
         }
@@ -252,8 +251,8 @@ fn complete(
 }
 
 /// Build the destination path for a clone: `<repos_dir>/<project_name>/<slot_id>`.
-fn clone_dest(repos_dir: &Path, project_name: &str, slot_id: SlotId) -> PathBuf {
-    repos_dir.join(project_name).join(slot_id.0.to_string())
+fn clone_dest(repos_dir: &Path, project_id: &ProjectId, slot_id: SlotId) -> PathBuf {
+    repos_dir.join(&*project_id.0).join(slot_id.0.to_string())
 }
 
 /// Translate a `PendingAction` into the `Command` that achieves it.
@@ -261,7 +260,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
     match action {
         PendingAction::Clone(project_id, slot_id) => {
             let project = config.project_config(project_id).unwrap();
-            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
+            let dest = clone_dest(repos_dir, project_id, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("clone")
@@ -273,8 +272,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
             cmd
         }
         PendingAction::CloneSubmodules(project_id, slot_id) => {
-            let project = config.project_config(project_id).unwrap();
-            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
+            let dest = clone_dest(repos_dir, project_id, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("submodule")
@@ -286,16 +284,14 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
             cmd
         }
         PendingAction::Update(project_id, slot_id) => {
-            let project = config.project_config(project_id).unwrap();
-            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
+            let dest = clone_dest(repos_dir, project_id, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("pull").arg("--ff-only").current_dir(&dest);
             cmd
         }
         PendingAction::UpdateSubmodules(project_id, slot_id) => {
-            let project = config.project_config(project_id).unwrap();
-            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
+            let dest = clone_dest(repos_dir, project_id, *slot_id);
 
             let mut cmd = Command::new("git");
             cmd.arg("submodule")
@@ -306,7 +302,7 @@ fn to_command(config: &Config, repos_dir: &Path, action: &PendingAction) -> Comm
         }
         PendingAction::Build(project_id, slot_id, step_id) => {
             let project = config.project_config(project_id).unwrap();
-            let dest = clone_dest(repos_dir, &project.name.0, *slot_id);
+            let dest = clone_dest(repos_dir, project_id, *slot_id);
             let steps = project
                 .build_command
                 .as_ref()
@@ -361,8 +357,7 @@ fn handle_add(
         };
     };
 
-    slot.status = SlotStatus::CheckedOut;
-    slot.checked_out_as = Some(checkout_name.clone());
+    slot.status = SlotStatus::CheckedOut(checkout_name.clone());
 
     let path = paths
         .repos_dir
@@ -384,9 +379,14 @@ fn handle_add(
 
 /// Build a flat `SlotInfo` from a project name + `Slot`.
 fn slot_info(project: &str, slot: &Slot) -> SlotInfo {
+    let checkout_name = if let SlotStatus::CheckedOut(ref name) = slot.status {
+        Some(name.clone())
+    } else {
+        None
+    };
     SlotInfo {
-        project: project.to_string(),
-        checkout_name: slot.checked_out_as.clone(),
+        project: Rc::from(project),
+        checkout_name,
         status: slot.status.to_api(),
         last_refreshed: slot
             .last_refreshed
@@ -405,7 +405,7 @@ fn handle_list(filter: &ListFilter, state: &ServerState) -> Response {
                 .iter()
                 .filter(|slot| match filter {
                     ListFilter::All => true,
-                    ListFilter::Active => slot.status == SlotStatus::CheckedOut,
+                    ListFilter::Active => matches!(slot.status, SlotStatus::CheckedOut(_)),
                     ListFilter::Free => slot.status == SlotStatus::Ready,
                 })
                 .map(|slot| slot_info(&project_id.0, slot))
@@ -428,10 +428,9 @@ fn handle_remove(
         .projects
         .get_mut(&project_id)
         .and_then(|project_state| {
-            project_state.slots.iter_mut().find(|s| {
-                s.status == SlotStatus::CheckedOut
-                    && s.checked_out_as.as_deref() == Some(checkout_name)
-            })
+            project_state.slots.iter_mut().find(
+                |s| matches!(&s.status, SlotStatus::CheckedOut(name) if name == checkout_name),
+            )
         });
     let Some(slot) = found else {
         return Ok(Response::Error {
@@ -442,7 +441,7 @@ fn handle_remove(
         });
     };
 
-    let repo_path = clone_dest(&paths.repos_dir, &project_id.0, slot.id);
+    let repo_path = clone_dest(&paths.repos_dir, &project_id, slot.id);
     if force {
         // TODO if we're in force, but the repo is dirty, when we return it pull will fail. I am a
         // little nervous about just blowing away the directory
@@ -469,7 +468,6 @@ fn handle_remove(
     );
 
     slot.status = SlotStatus::Ready;
-    slot.checked_out_as = None;
     slot.last_refreshed = Some(now);
 
     Ok(Response::Ok)
@@ -719,8 +717,7 @@ mod tests {
 
         // --- Phase 2: check out myproject slot 0, advance time, verify update cycle re-queues ---
         let myproject_state = state.projects.get_mut(&myproject).unwrap();
-        myproject_state.slots[0].status = SlotStatus::CheckedOut;
-        myproject_state.slots[0].checked_out_as = Some("user1".into());
+        myproject_state.slots[0].status = SlotStatus::CheckedOut("user1".into());
         let now2 = now + chrono::Duration::seconds(1801);
 
         let phase2 = [
@@ -758,7 +755,7 @@ mod tests {
         for (name, p) in &state.projects {
             for s in p.slots.iter() {
                 let expected = if *name == myproject && s.id == SlotId(0) {
-                    (SlotStatus::CheckedOut, now)
+                    (SlotStatus::CheckedOut("user1".into()), now)
                 } else {
                     (SlotStatus::Ready, now2)
                 };

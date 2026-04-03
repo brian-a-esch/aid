@@ -60,7 +60,7 @@ pub enum SlotStatus {
     WaitingToBuild,
     Built(StepId),
     Ready,
-    CheckedOut,
+    CheckedOut(String),
     Error,
 }
 
@@ -74,7 +74,7 @@ impl SlotStatus {
             }
             SlotStatus::WaitingToBuild | SlotStatus::Built(_) => SlotStatusSummary::Building,
             SlotStatus::Ready => SlotStatusSummary::Ready,
-            SlotStatus::CheckedOut => SlotStatusSummary::CheckedOut,
+            SlotStatus::CheckedOut(_) => SlotStatusSummary::CheckedOut,
             SlotStatus::Error => SlotStatusSummary::Error,
         }
     }
@@ -85,7 +85,6 @@ pub struct Slot {
     pub id: SlotId,
     pub status: SlotStatus,
     pub last_refreshed: Option<DateTime<Utc>>,
-    pub checked_out_as: Option<String>,
     pub error_message: Option<String>,
 }
 
@@ -107,13 +106,13 @@ impl ProjectState {
     pub fn available_slots(&self) -> impl Iterator<Item = &Slot> {
         self.slots
             .iter()
-            .filter(|s| s.status != SlotStatus::CheckedOut)
+            .filter(|s| !matches!(s.status, SlotStatus::CheckedOut(_)))
     }
 
     pub fn checked_out_slots(&self) -> impl Iterator<Item = &Slot> {
         self.slots
             .iter()
-            .filter(|s| s.status == SlotStatus::CheckedOut)
+            .filter(|s| matches!(s.status, SlotStatus::CheckedOut(_)))
     }
 }
 
