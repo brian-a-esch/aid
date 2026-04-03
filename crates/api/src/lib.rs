@@ -58,6 +58,12 @@ pub struct SlotInfo {
     pub error_message: Option<String>,
 }
 
+// Wrapper type to make serde enums happy
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotInfos {
+    pub slots: Vec<SlotInfo>,
+}
+
 /// The payload of a server response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -67,7 +73,7 @@ pub enum Response {
     /// Returned after a successful `Add`; carries the path that was handed out.
     Added { checkout_name: String, path: String },
     /// Returned for `List` requests.
-    List(Vec<SlotInfo>),
+    List(SlotInfos),
     /// The server encountered an error while processing the request.
     Error { message: String },
     /// The client's protocol version does not match the server's.

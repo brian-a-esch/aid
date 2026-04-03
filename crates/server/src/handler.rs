@@ -412,7 +412,7 @@ fn handle_list(filter: &ListFilter, state: &ServerState) -> Response {
         })
         .collect();
 
-    Response::List(slots)
+    Response::List(api::SlotInfos { slots })
 }
 
 fn handle_remove(
@@ -505,6 +505,10 @@ impl Handler for AidHandler<'_> {
             }
         };
 
+        info!(
+            "sending response for request id='{}', content={:?}",
+            envelope.request_id, payload
+        );
         let resp: ResponseEnvelope = Envelope {
             version: PROTOCOL_VERSION,
             request_id: envelope.request_id,

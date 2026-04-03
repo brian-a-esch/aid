@@ -6,12 +6,16 @@
 ///
 /// Each test gets its own isolated tempdir so tests can run in parallel without
 /// interfering with each other's socket files, lock files, or repo directories.
+use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use api::{Envelope, ListFilter, PROTOCOL_VERSION, Request, ResponseEnvelope, SlotStatusSummary};
 
 use tracing::info;
 
@@ -114,6 +118,33 @@ fn send_shutdown(shutdown_write: RawFd) {
     assert!(s == 1);
 }
 
+/// Build a `List { All }` request envelope with the given correlation id.
+fn make_list_request(id: &str) -> api::RequestEnvelope {
+    Envelope {
+        version: PROTOCOL_VERSION,
+        request_id: id.to_string(),
+        content: Request::List {
+            filter: ListFilter::All,
+        },
+    }
+}
+
+/// Open a fresh connection to the server socket, send `req` as a newline-terminated
+/// JSON line, read back one newline-terminated JSON line, and return the parsed
+/// `ResponseEnvelope`.
+fn send_request(socket_path: &Path, req: &api::RequestEnvelope) -> ResponseEnvelope {
+    let mut stream = UnixStream::connect(socket_path).expect("connect to server socket");
+
+    let mut bytes = api::serialize_request(req).expect("serialize request");
+    bytes.push(b'\n');
+    stream.write_all(&bytes).expect("write request");
+
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read response");
+    api::deserialize_response(line.trim_end().as_bytes()).expect("deserialize response")
+}
+
 #[test]
 fn server_clones_repo_to_ready() {
     init_logging();
@@ -166,6 +197,73 @@ fn server_clones_repo_to_ready() {
     );
     let content = std::fs::read_to_string(repo_dir.join("README.md")).unwrap();
     assert_eq!(content, "hello\n");
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+/// Verify that a client can query the repo state through the Unix socket API.
+///
+/// The test spins up the server, waits for the socket to appear, then polls
+/// with real `List { All }` request messages until the slot for `test-project`
+/// reports `Ready`.  This exercises the full client message round-trip —
+/// serialisation, dispatch in `AidHandler::handle_message`, and deserialisation
+/// of the `Response::List` payload — without touching the filesystem directly.
+#[test]
+fn query_repo_state_via_client_messages() {
+    init_logging();
+    let (paths, base_dir) = test_paths();
+
+    let repo = make_repo(&base_dir);
+    write_config(
+        repo.to_str().expect("repo path is valid UTF-8"),
+        &paths.config_file,
+    );
+    info!("created repo {repo:?}");
+
+    let (shutdown_read, shutdown_write) =
+        create_signal_pipe().expect("create shutdown signal pipe");
+    let (sigchild_read, _sigchild_write) =
+        create_signal_pipe().expect("create sigchild signal pipe");
+
+    let paths_clone = paths.clone();
+    let server_thread =
+        std::thread::spawn(move || server::server::run(&paths_clone, shutdown_read, sigchild_read));
+
+    // Wait for the socket to appear before attempting to connect.
+    assert!(
+        wait_until(Duration::from_secs(5), || paths.socket_file.exists()),
+        "server socket never appeared at {:?}",
+        paths.socket_file,
+    );
+
+    // Poll via List messages until the slot reaches Ready (up to 15 s).
+    let req = make_list_request("1");
+    let ready = wait_until(Duration::from_secs(15), || {
+        let resp = send_request(&paths.socket_file, &req);
+        assert_eq!(resp.request_id, "1", "response request_id should be echoed");
+        if let api::Response::List(slots) = resp.content {
+            slots
+                .slots
+                .iter()
+                .any(|s| s.status == SlotStatusSummary::Ready && s.project == "test-project".into())
+        } else {
+            false
+        }
+    });
+
+    send_shutdown(shutdown_write.as_raw_fd());
+    info!("sent shutdown signal");
+
+    let server_result = server_thread.join().expect("server thread panicked");
+    assert!(
+        server_result.is_ok(),
+        "server::run returned an error: {server_result:?}"
+    );
+
+    assert!(
+        ready,
+        "no slot for 'test-project' reached Ready status within the timeout"
+    );
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
