@@ -77,8 +77,10 @@ repo_url = "https://github.com/org/other"
   an error. Initial clone failing seems like a problem. For now, a repo in an
   error'ed state need to stop having work done, but count against our project
   quota
-- Add handshake with protocol version & reject clients with wrong version
-- Add api typedefs, we're going to write client
+- When server has error processing client's request it needs to 1) log an
+  error. Right now we just eat the error and print nothing. 2) hang up on the
+  client socket
+- Get logger working on all tests
 - Hot reload config
 
 ## Future Ideas
