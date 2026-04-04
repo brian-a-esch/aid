@@ -417,13 +417,13 @@ fn handle_list(filter: &ListFilter, state: &ServerState) -> Response {
 
 fn handle_remove(
     now: DateTime<Utc>,
+    project_name: &str,
     checkout_name: &str,
     force: bool,
     state: &mut ServerState,
     paths: &Paths,
 ) -> Result<Response> {
-    // Find the slot by checkout_name across all projects.
-    let project_id = ProjectId(Rc::from("myproject"));
+    let project_id = ProjectId(Rc::from(project_name));
     let found = state
         .projects
         .get_mut(&project_id)
@@ -435,8 +435,7 @@ fn handle_remove(
     let Some(slot) = found else {
         return Ok(Response::Error {
             message: format!(
-                "no checked-out slot named '{checkout_name} for project {}'",
-                project_id.0
+                "no checked-out slot named '{checkout_name}' for project '{project_name}'"
             ),
         });
     };
@@ -490,9 +489,17 @@ impl Handler for AidHandler<'_> {
                 } => handle_add(&project_name, checkout_name, &mut self.state, self.paths),
                 Request::List { filter } => handle_list(&filter, &self.state),
                 Request::Remove {
+                    project_name,
                     checkout_name,
                     force,
-                } => handle_remove(now, &checkout_name, force, &mut self.state, self.paths)?,
+                } => handle_remove(
+                    now,
+                    &project_name,
+                    &checkout_name,
+                    force,
+                    &mut self.state,
+                    self.paths,
+                )?,
             }
         } else {
             warn!(

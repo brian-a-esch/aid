@@ -29,6 +29,7 @@ pub enum Request {
     List { filter: ListFilter },
     /// Return a checked-out slot to the pool
     Remove {
+        project_name: String,
         checkout_name: String,
         /// Skip dirty-tree check.
         force: bool,
