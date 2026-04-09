@@ -16,6 +16,8 @@ name = "aid"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "api",
+ "cli",
  "server",
  "tracing-subscriber",
 ]
@@ -92,6 +94,15 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link",
+]
+
+[[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api",
+ "serde_json",
 ]
 
 [[package]]

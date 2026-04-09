@@ -53,6 +53,8 @@ pub struct SlotInfo {
     pub project: Rc<str>,
     /// Set when the slot is currently checked out.
     pub checkout_name: Option<String>,
+    /// Filesystem path to the slot's working directory. Only set for checked-out slots.
+    pub path: Option<String>,
     pub status: SlotStatusSummary,
     /// ISO-8601 timestamp of the last successful refresh, if any.
     pub last_refreshed: Option<String>,

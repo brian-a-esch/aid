@@ -377,16 +377,20 @@ fn handle_add(
     }
 }
 
-/// Build a flat `SlotInfo` from a project name + `Slot`.
-fn slot_info(project: &str, slot: &Slot) -> SlotInfo {
-    let checkout_name = if let SlotStatus::CheckedOut(ref name) = slot.status {
-        Some(name.clone())
+/// Build a flat `SlotInfo` from a `ProjectId` + `Slot`.
+fn slot_info(repos_dir: &Path, project_id: &ProjectId, slot: &Slot) -> SlotInfo {
+    let (checkout_name, path) = if let SlotStatus::CheckedOut(ref name) = slot.status {
+        let p = clone_dest(repos_dir, project_id, slot.id)
+            .to_string_lossy()
+            .into_owned();
+        (Some(name.clone()), Some(p))
     } else {
-        None
+        (None, None)
     };
     SlotInfo {
-        project: Rc::from(project),
+        project: Rc::clone(&project_id.0),
         checkout_name,
+        path,
         status: slot.status.to_api(),
         last_refreshed: slot
             .last_refreshed
@@ -395,7 +399,7 @@ fn slot_info(project: &str, slot: &Slot) -> SlotInfo {
     }
 }
 
-fn handle_list(filter: &ListFilter, state: &ServerState) -> Response {
+fn handle_list(filter: &ListFilter, state: &ServerState, repos_dir: &Path) -> Response {
     let slots: Vec<SlotInfo> = state
         .projects
         .iter()
@@ -408,7 +412,7 @@ fn handle_list(filter: &ListFilter, state: &ServerState) -> Response {
                     ListFilter::Active => matches!(slot.status, SlotStatus::CheckedOut(_)),
                     ListFilter::Free => slot.status == SlotStatus::Ready,
                 })
-                .map(|slot| slot_info(&project_id.0, slot))
+                .map(|slot| slot_info(repos_dir, project_id, slot))
         })
         .collect();
 
@@ -487,7 +491,9 @@ impl Handler for AidHandler<'_> {
                     project_name,
                     checkout_name,
                 } => handle_add(&project_name, checkout_name, &mut self.state, self.paths),
-                Request::List { filter } => handle_list(&filter, &self.state),
+                Request::List { filter } => {
+                    handle_list(&filter, &self.state, &self.paths.repos_dir)
+                }
                 Request::Remove {
                     project_name,
                     checkout_name,
