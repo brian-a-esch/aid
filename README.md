@@ -82,6 +82,8 @@ repo_url = "https://github.com/org/other"
   client socket
 - Get logger working on all tests
 - Hot reload config
+- State persistence: `save_state()` is defined but never called. State loaded
+  at startup is not persisted across server restarts yet
 
 ## Future Ideas
 
