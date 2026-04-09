@@ -33,7 +33,9 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+api = { path = "crates/api" }
 server = { path = "crates/server" }
+cli = { path = "crates/cli" }
 anyhow.workspace = true
 tracing-subscriber.workspace = true
 

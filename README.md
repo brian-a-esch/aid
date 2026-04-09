@@ -24,6 +24,9 @@ directories. The commands we have are
 # allocates a project to the user, they refer to it via the checkout_name
 aid add <project_name> <checkout_name>
 
+# changes your working directory to the checked out name (see Configuration section)
+aid cd <checkout_name>
+
 # lists all the projects, both in use and in background 
 aid list
 
@@ -41,6 +44,12 @@ aid rm --force <checkout_name>
 ```
 
 ### Configuration
+
+Like starfish we need install, this gives
+```sh
+eval "$(aid init bash)"  # in your ~/.bashrc
+eval "$(aid init zsh)"  # in your ~/.zshrc
+```
 
 The config file lives at `~/.config/aid/config.toml`. Each `[[projects]]` entry
 describes a repository to clone, build, and keep fresh.
