@@ -145,17 +145,25 @@ fn run_list(paths: &Paths, filter: ListFilter) -> anyhow::Result<()> {
             if slot_infos.slots.is_empty() {
                 println!("No slots found.");
             } else {
+                let home = std::env::var("HOME").unwrap_or_default();
+                println!(
+                    "{:<20} {:<20} {:<12} {}",
+                    "CHECKOUT", "PROJECT", "STATUS", "PATH",
+                );
                 for slot in &slot_infos.slots {
                     let name = slot.checkout_name.as_deref().unwrap_or("-");
-                    let refreshed = slot.last_refreshed.as_deref().unwrap_or("-");
-                    let path = slot.path.as_deref().unwrap_or("-");
+                    let path_raw = slot.path.as_deref().unwrap_or("-");
+                    let path = if !home.is_empty() {
+                        path_raw.strip_prefix(&home).unwrap_or(path_raw)
+                    } else {
+                        path_raw
+                    };
                     println!(
-                        "{:<20} {:<20} {:<12} {:<30} {}",
-                        slot.project,
+                        "{:<20} {:<20} {:<12} {}",
                         name,
+                        slot.project,
                         format!("{:?}", slot.status).to_lowercase(),
                         path,
-                        refreshed,
                     );
                 }
             }
