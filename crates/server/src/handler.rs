@@ -136,11 +136,17 @@ fn step(now: DateTime<Utc>, state: &ServerState, config: &Config) -> Option<Pend
                 };
 
                 if let Some(s) = next_step_id {
-                    return Some(PendingAction::Build(
-                        project_config.name.clone(),
-                        slot.id,
-                        StepId(s),
-                    ));
+                    let n_steps = project_config
+                        .build_command
+                        .as_ref()
+                        .map_or(0, |bc| bc.0.len());
+                    if s < n_steps {
+                        return Some(PendingAction::Build(
+                            project_config.name.clone(),
+                            slot.id,
+                            StepId(s),
+                        ));
+                    }
                 }
             }
         }
@@ -210,7 +216,7 @@ fn complete(
                 if project_config.has_submodules {
                     slot.status = SlotStatus::PartiallyUpdated;
                 } else if project_config.build_command.is_some() {
-                    slot.status = SlotStatus::Built(StepId(0));
+                    slot.status = SlotStatus::WaitingToBuild;
                 } else {
                     slot.status = SlotStatus::Ready;
                     slot.last_refreshed = Some(now);
@@ -701,9 +707,8 @@ mod tests {
             PendingAction::Clone(p.clone(), SlotId(1)),
             PendingAction::Update(p.clone(), SlotId(0)),
             PendingAction::Update(p.clone(), SlotId(1)),
-            // This step fails for some reason
-            PendingAction::Build(p.clone(), SlotId(0), StepId(1)),
-            PendingAction::Build(p.clone(), SlotId(1), StepId(1)),
+            PendingAction::Build(p.clone(), SlotId(0), StepId(0)),
+            PendingAction::Build(p.clone(), SlotId(1), StepId(0)),
         ];
 
         for (i, expected) in steps.into_iter().enumerate() {
