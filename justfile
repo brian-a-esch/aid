@@ -14,3 +14,6 @@ format-check:
 
 format:
     cargo fmt
+
+install:
+    cargo install --path .
