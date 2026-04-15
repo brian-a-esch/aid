@@ -53,6 +53,19 @@ fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Usage: aid init <bash|zsh>"))?;
             run_init(shell)?;
         }
+        Some("rm") => {
+            let mut force = false;
+            let mut rest = &args[2..];
+            if rest.first().map(String::as_str) == Some("--force") {
+                force = true;
+                rest = &rest[1..];
+            }
+            let checkout_name = rest
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("Usage: aid rm [--force] <checkout_name>"))?;
+            let paths = resolve_paths()?;
+            run_rm(&paths, checkout_name, force)?;
+        }
         Some("completions") => {
             let subcmd = args
                 .get(2)
@@ -63,13 +76,13 @@ fn main() -> anyhow::Result<()> {
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
             eprintln!(
-                "Usage: aid <server|add <project> <checkout>|list [--active|--free]|cd <checkout>|init <bash|zsh>>"
+                "Usage: aid <server|add <project> <checkout>|list [--active|--free]|cd <checkout>|rm [--force] <checkout>|init <bash|zsh>>"
             );
             std::process::exit(1);
         }
         None => {
             eprintln!(
-                "Usage: aid <server|add <project> <checkout>|list [--active|--free]|cd <checkout>|init <bash|zsh>>"
+                "Usage: aid <server|add <project> <checkout>|list [--active|--free]|cd <checkout>|rm [--force] <checkout>|init <bash|zsh>>"
             );
             std::process::exit(1);
         }
@@ -145,21 +158,22 @@ fn run_list(paths: &Paths, filter: ListFilter) -> anyhow::Result<()> {
             if slot_infos.slots.is_empty() {
                 println!("No slots found.");
             } else {
+                macro_rules! col_fmt {
+                    ($a:expr, $b:expr, $c:expr, $d:expr $(,)?) => {
+                        println!("{:<20} {:<20} {:<12} {}", $a, $b, $c, $d)
+                    };
+                }
                 let home = std::env::var("HOME").unwrap_or_default();
-                println!(
-                    "{:<20} {:<20} {:<12} {}",
-                    "CHECKOUT", "PROJECT", "STATUS", "PATH",
-                );
+                col_fmt!("CHECKOUT", "PROJECT", "STATUS", "PATH");
                 for slot in &slot_infos.slots {
                     let name = slot.checkout_name.as_deref().unwrap_or("-");
                     let path_raw = slot.path.as_deref().unwrap_or("-");
-                    let path = if !home.is_empty() {
-                        path_raw.strip_prefix(&home).unwrap_or(path_raw)
-                    } else {
+                    let path = if home.is_empty() {
                         path_raw
+                    } else {
+                        path_raw.strip_prefix(&home).unwrap_or(path_raw)
                     };
-                    println!(
-                        "{:<20} {:<20} {:<12} {}",
+                    col_fmt!(
                         name,
                         slot.project,
                         format!("{:?}", slot.status).to_lowercase(),
@@ -312,11 +326,11 @@ _aid_completions() {{
     add)
       COMPREPLY=( $(compgen -W "$(command aid completions add 2>/dev/null)" -- "$cur") )
       ;;
-    cd)
+    cd|rm)
       COMPREPLY=( $(compgen -W "$(command aid completions cd 2>/dev/null)" -- "$cur") )
       ;;
     aid)
-      COMPREPLY=( $(compgen -W "server add list cd init" -- "$cur") )
+      COMPREPLY=( $(compgen -W "server add list cd rm init" -- "$cur") )
       ;;
   esac
 }}
@@ -344,7 +358,7 @@ _aid_completions() {{
 
   case $state in
     subcmd)
-      _values 'subcommand' server add list cd init
+      _values 'subcommand' server add list cd rm init
       ;;
     arg)
       case $words[2] in
@@ -353,7 +367,7 @@ _aid_completions() {{
           projects=($( command aid completions add 2>/dev/null ))
           _values 'project' $projects
           ;;
-        cd)
+        cd|rm)
           local checkouts
           checkouts=($( command aid completions cd 2>/dev/null ))
           _values 'checkout' $checkouts
@@ -370,6 +384,82 @@ compdef _aid_completions aid"#
             anyhow::bail!("unsupported shell '{other}'; supported: bash, zsh");
         }
     }
+    Ok(())
+}
+
+fn run_rm(paths: &Paths, checkout_name: &str, force: bool) -> anyhow::Result<()> {
+    // First, resolve the project name by listing active slots.
+    let list_req = RequestEnvelope {
+        version: PROTOCOL_VERSION,
+        request_id: "1".to_string(),
+        content: Request::List {
+            filter: ListFilter::Active,
+        },
+    };
+
+    let mut stream = client::connect(&paths.socket_file)?;
+    client::send_request(&mut stream, &list_req)?;
+    let list_resp = client::recv_response(&mut stream)?;
+
+    let project_name = match list_resp.content {
+        Response::List(slot_infos) => {
+            let slot = slot_infos
+                .slots
+                .iter()
+                .find(|s| s.checkout_name.as_deref() == Some(checkout_name));
+            if let Some(s) = slot {
+                s.project.to_string()
+            } else {
+                eprintln!("no active checkout named '{checkout_name}'");
+                std::process::exit(1);
+            }
+        }
+        Response::Error { message } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        Response::VersionMismatch { expected, got } => {
+            eprintln!("protocol version mismatch: server expects {expected}, client sent {got}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("unexpected response: {other:?}");
+            std::process::exit(1);
+        }
+    };
+
+    let rm_req = RequestEnvelope {
+        version: PROTOCOL_VERSION,
+        request_id: "2".to_string(),
+        content: Request::Remove {
+            project_name,
+            checkout_name: checkout_name.to_string(),
+            force,
+        },
+    };
+
+    let mut stream = client::connect(&paths.socket_file)?;
+    client::send_request(&mut stream, &rm_req)?;
+    let resp = client::recv_response(&mut stream)?;
+
+    match resp.content {
+        Response::Ok => {
+            println!("returned '{checkout_name}'");
+        }
+        Response::Error { message } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        Response::VersionMismatch { expected, got } => {
+            eprintln!("protocol version mismatch: server expects {expected}, client sent {got}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("unexpected response: {other:?}");
+            std::process::exit(1);
+        }
+    }
+
     Ok(())
 }
 
