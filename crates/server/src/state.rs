@@ -80,7 +80,7 @@ impl SlotStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Slot {
     pub id: SlotId,
     pub status: SlotStatus,
@@ -88,7 +88,7 @@ pub struct Slot {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProjectState {
     pub slots: Vec<Slot>,
 }
@@ -116,7 +116,7 @@ impl ProjectState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerState {
     pub projects: HashMap<ProjectId, ProjectState>,
     pub last_updated: DateTime<Utc>,
@@ -139,7 +139,10 @@ pub fn load_state(path: &Path) -> Result<ServerState> {
         return Ok(ServerState::default());
     }
     let contents = std::fs::read_to_string(path)?;
-    let state: ServerState = serde_json::from_str(&contents)?;
+    let mut state: ServerState = serde_json::from_str(&contents)?;
+    // Any in-flight action recorded at shutdown will never complete because the
+    // child process is gone. Clear it so the scheduler can reschedule the work.
+    state.pending_action = None;
     Ok(state)
 }
 

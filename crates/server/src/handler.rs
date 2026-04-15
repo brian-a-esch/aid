@@ -323,6 +323,72 @@ pub struct AidHandler<'a> {
     paths: &'a Paths,
 }
 
+/// Implemented by handlers that own a [`ServerState`] and can expose it for
+/// comparison (e.g. to detect whether a call mutated the state).
+pub trait HasState {
+    fn server_state(&self) -> &ServerState;
+}
+
+pub struct PersistingHandler<'a, H> {
+    inner: H,
+    paths: &'a Paths,
+    prev: ServerState,
+    current: ServerState,
+}
+
+impl<'a, H: Handler + HasState> PersistingHandler<'a, H> {
+    pub fn new(inner: H, paths: &'a Paths) -> Self {
+        let initial = inner.server_state().clone();
+        Self {
+            inner,
+            paths,
+            prev: initial.clone(),
+            current: initial,
+        }
+    }
+
+    /// Sync `current` from the inner handler, save if changed, advance `prev`.
+    fn save_if_changed(&mut self) -> Result<()> {
+        self.current = self.inner.server_state().clone();
+        if self.current != self.prev {
+            crate::state::save_state(&self.paths.state_file, &self.current)?;
+            self.prev = self.current.clone();
+        }
+        Ok(())
+    }
+}
+
+impl<H: Handler + HasState> Handler for PersistingHandler<'_, H> {
+    fn handle_message(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+        msg: &[u8],
+    ) -> Result<Vec<u8>> {
+        let result = self.inner.handle_message(now, msg)?;
+        self.save_if_changed()?;
+        Ok(result)
+    }
+
+    fn handle_child_exit(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+        result: crate::poll_loop::ChildExit,
+    ) {
+        self.inner.handle_child_exit(now, result);
+        if let Err(e) = self.save_if_changed() {
+            tracing::error!("failed to persist state after child exit: {e}");
+        }
+    }
+
+    fn on_idle(&mut self, now: chrono::DateTime<chrono::Utc>) -> Option<std::process::Command> {
+        let cmd = self.inner.on_idle(now);
+        if let Err(e) = self.save_if_changed() {
+            tracing::error!("failed to persist state after on_idle: {e}");
+        }
+        cmd
+    }
+}
+
 impl<'a> AidHandler<'a> {
     #[must_use]
     pub fn new(config: Config, state: ServerState, paths: &'a Paths) -> Self {
@@ -474,6 +540,12 @@ fn handle_remove(
     slot.last_refreshed = Some(now);
 
     Ok(Response::Ok)
+}
+
+impl HasState for AidHandler<'_> {
+    fn server_state(&self) -> &ServerState {
+        &self.state
+    }
 }
 
 impl Handler for AidHandler<'_> {

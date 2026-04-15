@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{self};
 use crate::error::{Result, ServerError};
-use crate::handler::AidHandler;
+use crate::handler::{AidHandler, PersistingHandler};
 use crate::poll_loop;
 use crate::state::{self, Paths};
 
@@ -38,7 +38,7 @@ fn run_with_lockfile(paths: &Paths, shutdown_fd: OwnedFd, sigchild_fd: OwnedFd) 
         listener,
         shutdown_fd,
         sigchild_fd,
-        AidHandler::new(config, server_state, paths),
+        PersistingHandler::new(AidHandler::new(config, server_state, paths), paths),
     )?;
     match event_loop.run() {
         Ok(()) => info!("aid server loop closed, exiting"),

@@ -161,7 +161,15 @@ impl TestServer {
     fn start(paths: &Paths, base_dir: PathBuf, repo_url: &str) -> Self {
         init_logging();
         write_config(repo_url, &paths.config_file);
+        Self::spawn(paths, base_dir)
+    }
 
+    fn restart(paths: &Paths, base_dir: PathBuf) -> Self {
+        init_logging();
+        Self::spawn(paths, base_dir)
+    }
+
+    fn spawn(paths: &Paths, base_dir: PathBuf) -> Self {
         let (shutdown_read, shutdown_write) =
             create_signal_pipe().expect("create shutdown signal pipe");
         let (sigchild_read, _sigchild_write) =
@@ -291,10 +299,21 @@ fn server_clones_repo_to_ready() {
 fn checkout_triggers_background_provisioning_and_return_restores_ready() {
     let (paths, base_dir) = test_paths();
     let repo = make_repo(&base_dir);
-    let mut server = TestServer::start(&paths, base_dir, repo.to_str().unwrap());
+    let mut server = TestServer::start(&paths, base_dir.clone(), repo.to_str().unwrap());
 
     server.wait_for_ready("test-project");
     let checkout_path = server.checkout("test-project", "my-checkout");
+
+    let slots = server.list_slots();
+    assert!(
+        slots
+            .iter()
+            .any(|s| s.status == SlotStatusSummary::CheckedOut)
+    );
+
+    // Restart mid-flight: the CheckedOut state must survive the cycle.
+    server.shutdown();
+    let mut server = TestServer::restart(&paths, base_dir.clone());
 
     let slots = server.list_slots();
     assert!(
@@ -320,6 +339,20 @@ fn checkout_triggers_background_provisioning_and_return_restores_ready() {
             .count()
             >= 2
     }));
+
+    // Restart again: both Ready slots must survive.
+    server.shutdown();
+    let mut server = TestServer::restart(&paths, base_dir);
+
+    assert_eq!(
+        server
+            .list_slots()
+            .iter()
+            .filter(|s| s.status == SlotStatusSummary::Ready)
+            .count(),
+        2,
+        "both Ready slots must survive restart after remove"
+    );
 
     server.shutdown();
 }
