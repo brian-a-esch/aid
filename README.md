@@ -81,6 +81,9 @@ repo_url = "https://github.com/org/other"
 ```
 
 ### Issues
+- Have over n_slots get removed from system
+- Have commit in slot via `git2` crate. If update does not pull any new change,
+  do not re-run build
 - Need to have error model in place for when repo update or build fails. A
   retry loop for poll makes sense. Build failing once seems like it should be
   an error. Initial clone failing seems like a problem. For now, a repo in an
@@ -91,8 +94,6 @@ repo_url = "https://github.com/org/other"
   client socket
 - Get logger working on all tests
 - Hot reload config
-- State persistence: `save_state()` is defined but never called. State loaded
-  at startup is not persisted across server restarts yet
 
 ## Future Ideas
 
